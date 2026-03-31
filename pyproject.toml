@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pycurltx"
+version = "0.1.0"
+description = "An httpx transport powered by pycurl"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["anyio>=4.4", "httpx>=0.27", "pycurl>=7.45"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pycurltx"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
