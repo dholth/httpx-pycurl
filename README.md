@@ -82,3 +82,10 @@ async with httpx.AsyncClient(transport=transport) as client:
 - The async transport performs curl operations in a worker thread.
 - `PyCurlAsyncMultiSocketTransport` integrates curl sockets with the asyncio event loop.
 - Verbose curl logging is supported via `verbose=True` and optional `debug_callback`.
+
+## TODO
+
+- curl supports proxies
+- curl supports native certificate store on some builds
+- configure curl to use cacerts store
+- ...
