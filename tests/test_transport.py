@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 from types import SimpleNamespace
 
+import anyio
 import httpx
 import pytest
 
@@ -293,7 +296,58 @@ async def test_async_multi_socket_transport(monkeypatch: pytest.MonkeyPatch):
     tx = transport.PyCurlAsyncMultiSocketTransport()
     request = httpx.Request("GET", "https://example.com/socket")
 
-    response = await tx.handle_async_request(request)
+    with anyio.fail_after(5):
+        response = await tx.handle_async_request(request)
 
     assert await response.aread() == b"socket"
     await tx.aclose()
+
+
+@pytest.mark.anyio
+async def test_async_multi_socket_transport_real_curl_local_server(anyio_backend):
+    if transport.pycurl is None:
+        pytest.skip("pycurl is not installed")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = f"ok {self.path}".encode("ascii")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    tx = transport.PyCurlAsyncMultiSocketTransport()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        responses: dict[str, bytes] = {}
+
+        async def fetch(path: str):
+            request = httpx.Request("GET", f"{base_url}{path}")
+            response = await tx.handle_async_request(request)
+            responses[path] = await response.aread()
+            await response.aclose()
+
+        with anyio.fail_after(10):
+            async with anyio.create_task_group() as task_group:
+                for path in ("/one", "/two", "/three", "/four"):
+                    task_group.start_soon(fetch, path)
+
+        assert responses == {
+            "/one": b"ok /one",
+            "/two": b"ok /two",
+            "/three": b"ok /three",
+            "/four": b"ok /four",
+        }
+    finally:
+        await tx.aclose()
+        server.shutdown()
+        thread.join()
+        server.server_close()

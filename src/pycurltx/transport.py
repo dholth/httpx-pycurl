@@ -18,8 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - allows testing with fakes
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
-    from typing import Callable
-    from typing import BinaryIO
+    from typing import BinaryIO, Callable
 
 
 def _require_pycurl():
@@ -174,6 +173,7 @@ def _configure_curl(
             context.debug_callback = debug_callback
             curl.setopt(_pycurl.DEBUGFUNCTION, context.debug_callback)
         elif debug_logger is not None:
+
             def _log_debug(info_type: int, data: bytes):
                 debug_logger.debug("curl[%s] %r", info_type, data)
 
@@ -260,7 +260,9 @@ class PyCurlTransport(httpx.BaseTransport):
             headers=curl_response.headers,
             stream=_SyncFileStream(curl_response.body_file),
             request=request,
-            extensions={"http_version": curl_response.http_version},
+            extensions={
+                "http_version": curl_response.http_version
+            },  # b'2' here but b'HTTP/2' in regular httpx
         )
 
     def close(self):
@@ -545,7 +547,8 @@ class PyCurlAsyncMultiSocketTransport(httpx.AsyncBaseTransport):
         self._timer_handle: asyncio.TimerHandle | None = None
         self._socket_watch: dict[int, int] = {}
         self._transfers: dict[
-            pycurl.Curl, tuple[httpx.Request, _TransferContext, asyncio.Future[_CurlResponse]]
+            pycurl.Curl,
+            tuple[httpx.Request, _TransferContext, asyncio.Future[_CurlResponse]],
         ] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -563,7 +566,9 @@ class PyCurlAsyncMultiSocketTransport(httpx.AsyncBaseTransport):
         multi = self._ensure_multi()
         _pycurl = _require_pycurl()
 
-        context = _TransferContext(response_body=SpooledTemporaryFile(max_size=1024 * 1024))
+        context = _TransferContext(
+            response_body=SpooledTemporaryFile(max_size=1024 * 1024)
+        )
         curl = _pycurl.Curl()
         future: asyncio.Future[_CurlResponse] = loop.create_future()
 
@@ -687,7 +692,9 @@ class PyCurlAsyncMultiSocketTransport(httpx.AsyncBaseTransport):
             self._loop.call_soon(self._on_timeout)
             return 0
 
-        self._timer_handle = self._loop.call_later(timeout_ms / 1000.0, self._on_timeout)
+        self._timer_handle = self._loop.call_later(
+            timeout_ms / 1000.0, self._on_timeout
+        )
         return 0
 
     def _set_socket_watch(self, fd: int, what: int):
@@ -779,7 +786,9 @@ class PyCurlAsyncMultiSocketTransport(httpx.AsyncBaseTransport):
         _request, context, future = transfer
         context.response_body.close()
         if not future.done():
-            future.set_exception(httpx.TransportError(f"pycurl error {code}: {message}"))
+            future.set_exception(
+                httpx.TransportError(f"pycurl error {code}: {message}")
+            )
         self._remove_handle_only(curl)
 
     def _remove_transfer(self, curl: pycurl.Curl):
