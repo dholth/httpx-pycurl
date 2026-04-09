@@ -35,3 +35,9 @@ async def test_fetch_nginx(ca_cert, server):
         with pytest.raises(httpx.TransportError, match="SSL"):
             # demonstrate error when no cert
             response = await tx.handle_async_request(request)
+
+    async with httpx.AsyncClient(
+        transport=transport.PyCurlTx(cainfo=ca_cert)
+    ) as client:
+        response = await client.get(server)
+        assert "Welcome" in (await response.aread()).decode("utf-8")

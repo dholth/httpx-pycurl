@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from typing import BinaryIO, Callable
 
 
+CURLSSLOPT_NATIVE_CA = 1 << 4
+
+
 @dataclass
 class _CurlResponse:
     status_code: int
@@ -147,10 +150,13 @@ def _configure_curl(
     curl.setopt(_pycurl.SSL_VERIFYPEER, 1 if verify else 0)
     curl.setopt(_pycurl.SSL_VERIFYHOST, 2 if verify else 0)
 
-    # XXX is this costly?
+    # cost incurred when TLS connection is made
     if cainfo is None:
         cainfo = certifi.where()
     curl.setopt(_pycurl.CAINFO, cainfo)
+
+    # How to tell when available?
+    # curl.setopt(pycurl.SSL_OPTIONS, CURLSSLOPT_NATIVE_CA)
 
     if timeout is not None:
         curl.setopt(_pycurl.TIMEOUT_MS, int(timeout * 1000))
