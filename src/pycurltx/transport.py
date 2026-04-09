@@ -739,6 +739,17 @@ class PyCurlTx(httpx.AsyncBaseTransport):
         # will the curl object tell us its fail message or must we save it here?
         curl.event.set()
 
+    def _complete_error(
+        self,
+        multi: pycurl.CurlMulti,
+        curl: pycurl.Curl,
+        code: int,
+        message: str,
+    ):
+        # no context close...
+        curl.error = httpx.TransportError(f"pycurl error {code}: {message}")
+        curl.event.set()
+
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if self._closed:
             raise httpx.TransportError("transport is closed")
@@ -763,10 +774,13 @@ class PyCurlTx(httpx.AsyncBaseTransport):
                 cainfo=self._cainfo,
             )
             curl.event = anyio.Event()
+            curl.error = None
             self._curl_multi.add_handle(curl)
             self._post_curl()
 
             await curl.event.wait()
+            if curl.error is not None:
+                raise curl.error
 
             curl_response = _finalize_curl_response(curl, context)
             response = httpx.Response(
@@ -780,9 +794,13 @@ class PyCurlTx(httpx.AsyncBaseTransport):
 
         except Exception as error:
             context.response_body.close()
-            curl.close()
             log.debug("%s", error)
-            return
+            raise
+
+        finally:
+            # self._curl_multi.remove_handle(curl)
+            curl.close()
+            self._post_curl()
 
     async def aclose(self):
         if self._closed:

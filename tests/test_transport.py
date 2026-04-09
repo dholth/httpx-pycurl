@@ -302,3 +302,10 @@ async def test_fetch_nginx(ca_cert, server):
         body = (await response.aread()).decode("utf-8")
         assert "Welcome" in body
         print(body, response.status_code)
+
+    async with transport.PyCurlTx() as tx:
+        # E_PEER_FAILED_VERIFICATION 60
+        request = httpx.Request("GET", server)
+        with pytest.raises(httpx.TransportError, match="SSL"):
+            # demonstrate error when no cert
+            response = await tx.handle_async_request(request)
