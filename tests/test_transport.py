@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
 from pycurltx import transport
 
 
@@ -288,4 +289,16 @@ async def test_async_multi_socket_transport(monkeypatch: pytest.MonkeyPatch):
 
         response = await tx.handle_async_request(request)
 
-    print("Response", response.status_code, response.read())
+    print("Response", response.status_code, await response.aread())
+
+
+@pytest.mark.anyio
+async def test_fetch_nginx(ca_cert, server):
+    # note when running editor from flatpak on Linux /tmp/ is separate
+    async with transport.PyCurlTx(cainfo=ca_cert) as tx:
+        request = httpx.Request("GET", server)
+        response = await tx.handle_async_request(request)
+        assert response.status_code == 200
+        body = (await response.aread()).decode("utf-8")
+        assert "Welcome" in body
+        print(body, response.status_code)

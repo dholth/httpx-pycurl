@@ -4,10 +4,11 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from tempfile import SpooledTemporaryFile
-from typing import TYPE_CHECKING
 from threading import Condition, Event, Thread
+from typing import TYPE_CHECKING
 
 import anyio
+import certifi
 import httpx
 import pycurl
 import pycurl as _pycurl
@@ -125,6 +126,7 @@ def _configure_curl(
     verify: bool,
     follow_redirects: bool,
     user_agent: str | None,
+    cainfo: str | None,
     verbose: bool,
     debug_callback: Callable[[int, bytes], None] | None,
     debug_logger: logging.Logger | None,
@@ -160,6 +162,12 @@ def _configure_curl(
     curl.setopt(_pycurl.FOLLOWLOCATION, 1 if follow_redirects else 0)
     curl.setopt(_pycurl.SSL_VERIFYPEER, 1 if verify else 0)
     curl.setopt(_pycurl.SSL_VERIFYHOST, 2 if verify else 0)
+
+    # XXX is this costly?
+    if cainfo is None:
+        cainfo = certifi.where()
+    curl.setopt(_pycurl.CAINFO, cainfo)
+
     if timeout is not None:
         curl.setopt(_pycurl.TIMEOUT_MS, int(timeout * 1000))
     if user_agent:
@@ -589,6 +597,7 @@ class PyCurlTx(httpx.AsyncBaseTransport):
         debug_callback: Callable[[int, bytes], None] | None = None,
         debug_logger: logging.Logger | None = None,
         max_connections: int = 100,
+        cainfo: str | None = None,
     ):
         self._timeout = timeout
         self._verify = verify
@@ -599,6 +608,7 @@ class PyCurlTx(httpx.AsyncBaseTransport):
         self._debug_logger = debug_logger
         self._max_connections = max_connections
         self._closed = False
+        self._cainfo = cainfo
 
         # anyio
         # _tg holds task driving CurlMulti()
@@ -750,6 +760,7 @@ class PyCurlTx(httpx.AsyncBaseTransport):
                 verbose=self._verbose,
                 debug_callback=self._debug_callback,
                 debug_logger=self._debug_logger,
+                cainfo=self._cainfo,
             )
             curl.event = anyio.Event()
             self._curl_multi.add_handle(curl)
@@ -761,7 +772,7 @@ class PyCurlTx(httpx.AsyncBaseTransport):
             response = httpx.Response(
                 status_code=curl_response.status_code,
                 headers=curl_response.headers,
-                stream=_SyncFileStream(curl_response.body_file),
+                stream=_AsyncFileStream(curl_response.body_file),
                 request=request,
                 extensions={"http_version": curl_response.http_version},
             )
