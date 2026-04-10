@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -45,11 +46,15 @@ async def test_fetch_nginx(ca_cert, server):
         assert "Welcome" in (await response.aread()).decode("utf-8")
 
 
+@pytest.mark.parametrize("regular", [True, False])
 @pytest.mark.anyio
-async def test_fetch_nginx_parallel_data(ca_cert, server):
-    async with httpx.AsyncClient(
-        transport=transport.PyCurlTx(cainfo=ca_cert)
-    ) as client:
+async def test_fetch_nginx_parallel_data(ca_cert, server, regular, ssl_context):
+    begin = time.monotonic_ns()
+    if regular:
+        client = httpx.AsyncClient(http2=True, verify=ssl_context)
+    else:
+        client = httpx.AsyncClient(transport=transport.PyCurlTx(cainfo=ca_cert))
+    async with client as client:
         paths = ["/data/small", "/data/medium", "/data/large"]
         urls = [
             f"{server.removesuffix('/')}{path}" for path in paths for _ in range(20)
@@ -58,6 +63,10 @@ async def test_fetch_nginx_parallel_data(ca_cert, server):
         responses = await asyncio.gather(*(client.get(url) for url in urls))
 
     assert all(response.status_code == 200 for response in responses)
+    end = time.monotonic_ns()
+
+    print(f"{client._transport} took {(end - begin) / 1e9:0.03f}s")
 
     for response in responses:
         await response.aread()
+        # print(response.url, body[:16], len(body))

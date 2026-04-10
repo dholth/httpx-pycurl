@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import trustme
+import ssl
 from xprocess import ProcessStarter
 
 HERE = Path(__file__).parent
@@ -17,13 +18,16 @@ def certs():
     # https://en.wikipedia.org/wiki/Example.org
     server_cert = ca.issue_cert("localhost")
 
+    ssl_context = ssl.create_default_context()
+    ca.configure_trust(ssl_context)
+
     # Put the PEM-encoded data in a temporary file, for libraries that
     # insist on that:
     with (
         ca.cert_pem.tempfile() as ca_temp_path,
         server_cert.private_key_and_cert_chain_pem.tempfile() as server_cert_path,
     ):
-        yield ca_temp_path, server_cert_path
+        yield ca_temp_path, server_cert_path, ssl_context
 
 
 @pytest.fixture(scope="session")
@@ -34,6 +38,11 @@ def server_cert(certs):
 @pytest.fixture(scope="session")
 def ca_cert(certs):
     return certs[0]
+
+
+@pytest.fixture(scope="session")
+def ssl_context(certs):
+    return certs[2]
 
 
 @pytest.fixture(scope="session")

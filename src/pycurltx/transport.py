@@ -261,6 +261,8 @@ class PyCurlTx(httpx.AsyncBaseTransport):
         # called because it might have triggered callbacks.
         self._callback_tasks = []
         self._sockets = {}
+        self._timer_sequence = 0
+        self._next_timeout = None
 
         # curl_multi (could we be threadlocal or loop-local)
         self.__curl_multi = pycurl.CurlMulti()
@@ -272,7 +274,6 @@ class PyCurlTx(httpx.AsyncBaseTransport):
     async def __aenter__(self):
         tg = anyio.create_task_group()
         self._tg = await tg.__aenter__()
-        assert tg is self._tg
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -331,11 +332,13 @@ class PyCurlTx(httpx.AsyncBaseTransport):
 
     def _timer_callback(self, timeout_ms: int) -> None:
         log.debug("timer_callback: timeout=%d", timeout_ms)
-        self._callback_tasks.append(lambda: self._do_timer(timeout_ms))
+        self._next_timeout = timeout_ms
 
-    async def _do_timer(self, timeout_ms: int) -> None:
-        # will we always be in just one thread?
+    async def _do_timer(self, timeout_ms: int, sequence: int) -> None:
         await anyio.sleep(timeout_ms / 1000.0)
+        if sequence != self._timer_sequence:
+            # only most recent timer must fire
+            return
         log.debug("Timed out! %d", timeout_ms)
         running = self._curl_multi.socket_action(pycurl.SOCKET_TIMEOUT, 0)
         log.debug("%s xfers", running)
@@ -348,6 +351,12 @@ class PyCurlTx(httpx.AsyncBaseTransport):
         for callback in self._callback_tasks:
             self._tg.start_soon(callback)
         self._callback_tasks.clear()
+        if self._next_timeout is not None:
+            self._timer_sequence += 1
+            self._tg.start_soon(
+                lambda: self._do_timer(self._next_timeout, self._timer_sequence)
+            )
+            self._next_timeout = None
         # may belong inside the callback or after the callbacks run
         self._drain_messages(self._curl_multi)
 
@@ -444,7 +453,7 @@ class PyCurlTx(httpx.AsyncBaseTransport):
 
         finally:
             # self._curl_multi.remove_handle(curl)
-            curl.close()
+            # curl.close()  # for streaming responses, can't happen here
             self._post_curl()
 
     async def aclose(self):
