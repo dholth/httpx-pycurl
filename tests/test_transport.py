@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import time
 
-import httpx
 import pytest
 
+import httpx
 from httpx_pycurl import transport
 
 
@@ -74,3 +74,155 @@ async def test_fetch_nginx_parallel_data(ca_cert, server, regular, ssl_context):
         expected = ord(b"0")
         assert all((b == expected) for b in body)
         assert len(body) in (1024, 16 * 1024, 1024 * 1024)
+
+
+@pytest.mark.parametrize("regular", [True, False])
+@pytest.mark.asyncio
+async def test_fetch_nginx_parallel_streaming(ca_cert, server, regular, ssl_context):
+    """Test streaming response bodies with stream() instead of get()."""
+    begin = time.monotonic_ns()
+    if regular:
+        client = httpx.AsyncClient(http2=True, verify=ssl_context)
+    else:
+        client = httpx.AsyncClient(
+            transport=transport.AsyncPyCurlTransport(cainfo=ca_cert)
+        )
+    async with client as client:
+        paths = ["/data/small", "/data/medium", "/data/large"]
+        urls = [
+            f"{server.removesuffix('/')}{path}" for path in paths for _ in range(20)
+        ]
+
+        # Use stream() instead of get() to test async streaming response bodies
+        async def fetch_streaming(url):
+            async with client.stream("GET", url) as response:
+                return response.status_code, await response.aread()
+
+        results = await asyncio.gather(*(fetch_streaming(url) for url in urls))
+
+    assert all(status_code == 200 for status_code, _ in results)
+    end = time.monotonic_ns()
+
+    print(f"{client._transport} (streaming) took {(end - begin) / 1e9:0.03f}s")
+
+    for status_code, body in results:
+        assert status_code == 200
+        expected = ord(b"0")
+        assert all((b == expected) for b in body)
+        assert len(body) in (1024, 16 * 1024, 1024 * 1024)
+
+
+@pytest.mark.parametrize("regular", [True, False])
+@pytest.mark.asyncio
+async def test_fetch_nginx_parallel_streaming_chunks(
+    ca_cert, server, regular, ssl_context
+):
+    """Test streaming response bodies with chunk iteration instead of aread()."""
+    begin = time.monotonic_ns()
+    if regular:
+        client = httpx.AsyncClient(http2=True, verify=ssl_context)
+    else:
+        client = httpx.AsyncClient(
+            transport=transport.AsyncPyCurlTransport(cainfo=ca_cert)
+        )
+    async with client as client:
+        paths = ["/data/small", "/data/medium", "/data/large"]
+        urls = [
+            f"{server.removesuffix('/')}{path}" for path in paths for _ in range(20)
+        ]
+
+        # Stream with chunk iteration for true streaming performance
+        async def fetch_streaming_chunks(url):
+            async with client.stream("GET", url) as response:
+                body_size = 0
+                chunk_count = 0
+                async for chunk in response.aiter_bytes(chunk_size=4096):
+                    body_size += len(chunk)
+                    chunk_count += 1
+                return response.status_code, body_size, chunk_count
+
+        results = await asyncio.gather(*(fetch_streaming_chunks(url) for url in urls))
+
+    assert all(status_code == 200 for status_code, _, _ in results)
+    end = time.monotonic_ns()
+
+    print(f"{client._transport} (streaming chunks) took {(end - begin) / 1e9:0.03f}s")
+
+    for status_code, body_size, chunk_count in results:
+        assert status_code == 200
+        assert body_size in (1024, 16 * 1024, 1024 * 1024)
+        assert chunk_count > 0
+
+
+@pytest.mark.parametrize("regular", [True, False])
+@pytest.mark.asyncio
+async def test_timeout_behavior(regular, slow_server):
+    """Test timeout behavior comparing httpx and pycurl transports.
+
+    Both should timeout with a short timeout against a slow server endpoint.
+    """
+    url = f"{slow_server}delay"
+    timeout = 0.5  # 500ms timeout
+
+    if regular:
+        # httpx AsyncHTTPTransport
+        client = httpx.AsyncClient(timeout=timeout)
+        transport_name = "httpx.AsyncHTTPTransport"
+    else:
+        # AsyncPyCurlTransport
+        client = httpx.AsyncClient(
+            transport=transport.AsyncPyCurlTransport(timeout=timeout)
+        )
+        transport_name = "AsyncPyCurlTransport"
+
+    async with client:
+        start = time.monotonic()
+        with pytest.raises(
+            (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TransportError)
+        ):
+            await client.get(url)
+        elapsed = time.monotonic() - start
+
+        # Verify timeout was triggered reasonably quickly (within 2x timeout window)
+        assert elapsed < timeout * 2 + 0.5, (
+            f"{transport_name} took too long: {elapsed:.2f}s"
+        )
+        print(f"{transport_name} timeout after {elapsed:.2f}s")
+
+
+@pytest.mark.parametrize("regular", [True, False])
+@pytest.mark.asyncio
+async def test_timeout_behavior_streaming(regular, slow_server):
+    """Test timeout behavior with streaming chunk iteration.
+
+    Both should timeout when iterating over response chunks with a slow server.
+    """
+    url = f"{slow_server}delay"
+    timeout = 0.5  # 500ms timeout
+
+    if regular:
+        # httpx AsyncHTTPTransport
+        client = httpx.AsyncClient(timeout=timeout)
+        transport_name = "httpx.AsyncHTTPTransport"
+    else:
+        # AsyncPyCurlTransport
+        client = httpx.AsyncClient(
+            transport=transport.AsyncPyCurlTransport(timeout=timeout)
+        )
+        transport_name = "AsyncPyCurlTransport"
+
+    async with client:
+        start = time.monotonic()
+        with pytest.raises(
+            (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TransportError)
+        ):
+            async with client.stream("GET", url) as response:
+                async for chunk in response.aiter_bytes(chunk_size=4096):
+                    pass  # Iterate through chunks
+        elapsed = time.monotonic() - start
+
+        # Verify timeout was triggered reasonably quickly
+        assert elapsed < timeout * 2 + 0.5, (
+            f"{transport_name} took too long: {elapsed:.2f}s"
+        )
+        print(f"{transport_name} streaming timeout after {elapsed:.2f}s")

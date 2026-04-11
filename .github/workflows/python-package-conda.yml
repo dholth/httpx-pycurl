@@ -1,6 +1,6 @@
-name: Python Package using Conda
+name: Tests
 
-on: [push]
+on: [push, pull_request]
 
 jobs:
   build-linux:
@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: pycurltx
+          path: httpx-pycurl
 
       - name: Checkout httpx
         uses: actions/checkout@v4
@@ -33,19 +33,19 @@ jobs:
         run: |
           conda install conda-pypi editables pytest nginx pytest-asyncio pytest-xprocess trustme httpx pycurl h2 chardet zstandard brotli trio uvicorn cryptography
           conda pypi install --ignore-channels socksio
-          conda pypi install -e pycurltx/
+          conda pypi install -e httpx-pycurl/
 
       - name: Apply httpx patch
         run: |
           cd httpx
-          git apply ../pycurltx/tests/httpx-tests.patch
+          git apply ../httpx-pycurl/tests/httpx-tests.patch
 
-      - name: Run pycurltx tests
+      - name: Run httpx-pycurl tests
         run: |
-          cd pycurltx
+          cd httpx-pycurl
           pytest
 
-      - name: Run httpx async tests with pycurltx transport
+      - name: Run httpx async tests with httpx-pycurl transport
         run: |
           cd httpx
           pytest tests/client/test_async_client.py -k asyncio -v
