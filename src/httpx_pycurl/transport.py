@@ -41,11 +41,40 @@ class _TransferContext:
 
 
 class _RequestBodyReader:
-    def __init__(self, stream: Iterable[bytes]):
-        self._iterator = iter(stream)
+    def __init__(self, stream: Iterable[bytes] | AsyncIterator[bytes]):
+        # Check if stream is async
+        if hasattr(stream, "__aiter__"):
+            # For async streams, we'll collect all chunks upfront
+            # This is necessary because pycurl's READFUNCTION is synchronous
+            self._iterator = None
+            self._is_async = True
+            self._async_stream = stream
+            self._chunks = []
+            self._chunks_consumed = False
+        else:
+            self._iterator = iter(stream)
+            self._is_async = False
+            self._async_stream = None
+            self._chunks = []
         self._buffer = b""
 
+    async def _consume_async_chunks(self):
+        """Consume all chunks from async stream into memory."""
+        if self._chunks_consumed:
+            return
+        self._chunks_consumed = True
+        async for chunk in self._async_stream:
+            if chunk:
+                self._chunks.append(chunk)
+        # Create iterator from collected chunks
+        self._iterator = iter(self._chunks)
+
     def read(self, size: int) -> bytes:
+        if self._iterator is None:
+            # This shouldn't happen in normal flow for async streams
+            # as _consume_async_chunks should be called first
+            return b""
+
         while len(self._buffer) < size:
             try:
                 chunk = next(self._iterator)
@@ -194,6 +223,7 @@ def _configure_curl(
     debug_logger: logging.Logger | None,
     cainfo: str | None,
     async_stream: _AsyncQueueStream | None = None,
+    body_reader: _RequestBodyReader | None = None,
 ):
     def header_callback(chunk: bytes) -> int:
         line = chunk.rstrip(b"\r\n")
@@ -269,7 +299,8 @@ def _configure_curl(
     if not body_expected:
         return
 
-    body_reader = _RequestBodyReader(request.stream)
+    if body_reader is None:
+        body_reader = _RequestBodyReader(request.stream)
     curl.setopt(_pycurl.READFUNCTION, body_reader.read)
     size = int(content_length) if content_length is not None else -1
 
@@ -438,6 +469,11 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         context.async_stream = async_stream
 
         try:
+            # Pre-consume async request streams
+            body_reader = _RequestBodyReader(request.stream)
+            if body_reader._is_async:
+                await body_reader._consume_async_chunks()
+
             _configure_curl(
                 curl,
                 request,
@@ -451,6 +487,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                 debug_logger=self._debug_logger,
                 cainfo=self._cainfo,
                 async_stream=async_stream,
+                body_reader=body_reader,
             )
             self._transfers[curl] = (request, context, future)
             multi.add_handle(curl)
