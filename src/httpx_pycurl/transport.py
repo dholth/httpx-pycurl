@@ -116,6 +116,30 @@ def _parse_status_line(status_line: bytes | None) -> tuple[str, bytes]:
     return reason, version
 
 
+def _map_pycurl_error(code: int, message: str) -> Exception:
+    """Map pycurl error codes to appropriate httpx exceptions."""
+    # pycurl error code 1 is UNSUPPORTED_PROTOCOL
+    if code == _pycurl.E_UNSUPPORTED_PROTOCOL:
+        return httpx.UnsupportedProtocol(f"Protocol not supported: {message}")
+
+    # URL format errors
+    if code == _pycurl.E_URL_MALFORMAT or code == _pycurl.E_BAD_FUNCTION_ARGUMENT:
+        return httpx.LocalProtocolError(f"Invalid URL: {message}")
+
+    # Connection/timeout errors
+    if code in (
+        _pycurl.E_COULDNT_RESOLVE_HOST,
+        _pycurl.E_COULDNT_CONNECT,
+        _pycurl.E_OPERATION_TIMEDOUT,
+    ):
+        if code == _pycurl.E_OPERATION_TIMEDOUT:
+            return httpx.ConnectTimeout(f"Connection timeout: {message}")
+        return httpx.ConnectError(f"Connection error: {message}")
+
+    # Default to TransportError
+    return httpx.TransportError(f"pycurl error {code}: {message}")
+
+
 def _configure_curl(
     curl: pycurl.Curl,
     request: httpx.Request,
@@ -287,7 +311,7 @@ class PyCurlTransport(httpx.BaseTransport):
         except _pycurl.error as error:
             context.response_body.close()
             code, message = error.args
-            raise httpx.TransportError(f"pycurl error {code}: {message}") from error
+            raise _map_pycurl_error(code, str(message)) from error
         finally:
             curl.close()
 
@@ -330,7 +354,14 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         if self._closed:
             raise httpx.TransportError("transport is closed")
 
-        loop = asyncio.get_running_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Not running in asyncio (e.g., trio), so we can't use this transport
+            raise httpx.TransportError(
+                "AsyncPyCurlTransport only supports asyncio event loops, not trio"
+            )
+
         if self._loop is None:
             self._loop = loop
         elif self._loop is not loop:
@@ -376,7 +407,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             self._remove_transfer(curl)
             context.response_body.close()
             code, message = error.args
-            raise httpx.TransportError(f"pycurl error {code}: {message}") from error
+            raise _map_pycurl_error(code, str(message)) from error
         except Exception:
             self._remove_transfer(curl)
             context.response_body.close()
@@ -555,9 +586,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         _request, context, future = transfer
         context.response_body.close()
         if not future.done():
-            future.set_exception(
-                httpx.TransportError(f"pycurl error {code}: {message}")
-            )
+            future.set_exception(_map_pycurl_error(code, message))
         self._remove_handle_only(curl)
 
     def _remove_transfer(self, curl: pycurl.Curl):
