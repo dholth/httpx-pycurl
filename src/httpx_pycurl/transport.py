@@ -28,8 +28,9 @@ class _CurlResponse:
     status_code: int
     reason_phrase: str
     headers: list[tuple[bytes, bytes]]
-    body_file: BinaryIO
     http_version: bytes
+    body_file: BinaryIO | None = None
+    body_stream: _AsyncQueueStream | None = None
 
 
 @dataclass
@@ -37,15 +38,7 @@ class _TransferContext:
     response_body: BinaryIO
     status_line: bytes | None = None
     response_headers: list[tuple[bytes, bytes]] = field(default_factory=list)
-    debug_callback: Callable[[int, bytes], None] | None = None
-
-
-@dataclass
-class _PendingTask:
-    request: httpx.Request
-    done: Event
-    response: httpx.Response | None = None
-    error: Exception | None = None
+    async_stream: _AsyncQueueStream | None = None
 
 
 class _RequestBodyReader:
@@ -72,7 +65,9 @@ class _RequestBodyReader:
         return data
 
 
-class _SyncFileStream(httpx.SyncByteStream):
+class _FileStream(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """Unified file-based stream supporting both sync and async iteration."""
+
     def __init__(self, body_file: BinaryIO, chunk_size: int = 65536):
         self._body_file = body_file
         self._chunk_size = chunk_size
@@ -84,24 +79,15 @@ class _SyncFileStream(httpx.SyncByteStream):
                 break
             yield chunk
 
-    def close(self):
-        self._body_file.close()
-
-
-class _AsyncFileStream(httpx.AsyncByteStream):
-    def __init__(self, body_file: BinaryIO, chunk_size: int = 65536):
-        self._body_file = body_file
-        self._chunk_size = chunk_size
-
     async def __aiter__(self) -> AsyncIterator[bytes]:
         while True:
             chunk = self._body_file.read(self._chunk_size)
-            # XXX needs revision to be properly async+streaming, but
-            # async+"doesn't return response until all buffered" is also a
-            # useful mode.
             if not chunk:
                 break
             yield chunk
+
+    def close(self):
+        self._body_file.close()
 
     async def aclose(self):
         await anyio.to_thread.run_sync(self._body_file.close)
@@ -171,7 +157,7 @@ def _parse_status_line(status_line: bytes | None) -> tuple[str, bytes]:
     return reason, version
 
 
-def _map_pycurl_error(code: int, message: str) -> Exception:
+def _map_pycurl_error(code: int, message: str) -> httpx.TransportError:
     """Map pycurl error codes to appropriate httpx exceptions."""
     # pycurl error code 1 is UNSUPPORTED_PROTOCOL
     if code == _pycurl.E_UNSUPPORTED_PROTOCOL:
@@ -303,12 +289,15 @@ def _finalize_curl_response(
 ) -> _CurlResponse:
     status_code = int(curl.getinfo(_pycurl.RESPONSE_CODE))
     reason_phrase, http_version = _parse_status_line(context.status_line)
-    context.response_body.seek(0)
+    body_stream = context.async_stream
+    if body_stream is None:
+        context.response_body.seek(0)
     return _CurlResponse(
         status_code=status_code,
         reason_phrase=reason_phrase,
         headers=context.response_headers,
-        body_file=context.response_body,
+        body_file=context.response_body if body_stream is None else None,
+        body_stream=body_stream,
         http_version=http_version,
     )
 
@@ -334,14 +323,17 @@ class PyCurlTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         curl_response = self._perform_request(request)
+        stream = (
+            _FileStream(curl_response.body_file)
+            if curl_response.body_file
+            else curl_response.body_stream
+        )
         return httpx.Response(
             status_code=curl_response.status_code,
             headers=curl_response.headers,
-            stream=_SyncFileStream(curl_response.body_file),
+            stream=stream,
             request=request,
-            extensions={
-                "http_version": curl_response.http_version
-            },  # b'2' here but b'HTTP/2' in regular httpx
+            extensions={"http_version": curl_response.http_version},
         )
 
     def close(self):
@@ -410,7 +402,6 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                 httpx.Request,
                 _TransferContext,
                 asyncio.Future[_CurlResponse],
-                _AsyncQueueStream | None,
             ],
         ] = {}
 
@@ -445,6 +436,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
 
         # Create async queue stream for streaming response bodies
         async_stream = _AsyncQueueStream(loop)
+        context.async_stream = async_stream
 
         try:
             _configure_curl(
@@ -461,7 +453,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                 cainfo=self._cainfo,
                 async_stream=async_stream,
             )
-            self._transfers[curl] = (request, context, future, async_stream)
+            self._transfers[curl] = (request, context, future)
             multi.add_handle(curl)
             self._drive_socket(_pycurl.SOCKET_TIMEOUT, 0)
 
@@ -469,7 +461,8 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             return httpx.Response(
                 status_code=curl_response.status_code,
                 headers=curl_response.headers,
-                stream=async_stream,
+                stream=curl_response.body_stream
+                or _FileStream(curl_response.body_file),
                 request=request,
                 extensions={"http_version": curl_response.http_version},
             )
@@ -502,9 +495,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         if multi is None:
             return
 
-        for curl, (_request, context, future, async_stream) in list(
-            self._transfers.items()
-        ):
+        for curl, (_request, context, future) in list(self._transfers.items()):
             if not future.done():
                 future.set_exception(
                     httpx.TransportError("transport closed before request completed")
@@ -615,7 +606,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
 
         while True:
             status, _running = multi.socket_action(sock_fd, event_mask)
-            if status != getattr(_pycurl, "E_CALL_MULTI_PERFORM", -1):
+            if status != pycurl.E_CALL_MULTI_PERFORM:
                 break
 
         self._drain_info_read()
@@ -638,13 +629,13 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         transfer = self._transfers.pop(curl, None)
         if transfer is None:
             return
-        _request, context, future, async_stream = transfer
+        _request, context, future = transfer
 
         try:
             response = _finalize_curl_response(curl, context)
             # Signal end of stream if using async streaming
-            if async_stream is not None:
-                async_stream.signal_end_of_stream()
+            if context.async_stream is not None:
+                context.async_stream.signal_end_of_stream()
                 # Close the context file since we're streaming from queue instead
                 context.response_body.close()
             if not future.done():
@@ -660,7 +651,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         transfer = self._transfers.pop(curl, None)
         if transfer is None:
             return
-        _request, context, future, async_stream = transfer
+        _request, context, future = transfer
         context.response_body.close()
         if not future.done():
             future.set_exception(_map_pycurl_error(code, message))
