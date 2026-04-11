@@ -124,9 +124,11 @@ def slow_server():
     def run_server():
         server.serve_forever()
 
-    thread = threading.Thread(target=run_server, daemon=True)
+    thread = threading.Thread(target=run_server, daemon=False)
     thread.start()
 
     yield f"http://{host}:{port}/"
 
+    # Shutdown gracefully with a timeout to wait for in-flight requests
     server.shutdown()
+    thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to finish
