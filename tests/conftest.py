@@ -94,12 +94,16 @@ def server(tmp_path_factory, server_cert, xprocess):
 class SlowHandler(BaseHTTPRequestHandler):
     """HTTP handler that delays response."""
 
+    shutdown_flag = False
+
     def do_GET(self):
         try:
             if self.path == "/delay":
                 # Sleep in small increments so we can be interrupted quickly
                 # Total delay of 60 seconds, but in 0.1s chunks
                 for _ in range(600):
+                    if SlowHandler.shutdown_flag:
+                        return
                     time.sleep(0.1)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
@@ -131,6 +135,6 @@ def slow_server():
 
     yield f"http://{host}:{port}/"
 
-    # Shutdown gracefully with a timeout to wait for in-flight requests
+    SlowHandler.shutdown_flag = True
     server.shutdown()
-    thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to finish
+    thread.join(timeout=5.0)
