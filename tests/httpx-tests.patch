@@ -1,0 +1,47 @@
+--- httpx_orig/pyproject.toml	2026-04-11 13:40:19.473394417 -0400
++++ httpx_mod/pyproject.toml	2026-04-11 13:40:29.229341676 -0400
+@@ -119,8 +119,8 @@
+ filterwarnings = [
+   "error",
+   "ignore: You seem to already have a custom sys.excepthook handler installed. I'll skip installing Trio's custom handler, but this means MultiErrors will not show full tracebacks.:RuntimeWarning",
+-  # See: https://github.com/agronholm/anyio/issues/508
+-  "ignore: trio.MultiError is deprecated since Trio 0.22.0:trio.TrioDeprecationWarning"
++  "ignore: The global interpreter lock.*pycurl.*:RuntimeWarning",
++  "ignore: The global interpreter lock.*_brotli.*:RuntimeWarning"
+ ]
+ markers = [
+   "copied_from(source, changes=None): mark test as copied from somewhere else, along with a description of changes made to accodomate e.g. our test setup",
+--- httpx_orig/tests/conftest.py	2026-04-11 13:40:19.473854646 -0400
++++ httpx_mod/tests/conftest.py	2026-04-11 13:40:39.893069881 -0400
+@@ -285,3 +285,31 @@
+     config = Config(app=app, lifespan="off", loop="asyncio")
+     server = TestServer(config=config)
+     yield from serve_in_thread(server)
++
++
++# Patch AsyncClient to use AsyncPyCurlTransport from httpx_pycurl
++def pytest_configure(config):
++    """Patch httpx.AsyncClient to use AsyncPyCurlTransport for asyncio tests."""
++    try:
++        from httpx_pycurl import AsyncPyCurlTransport
++
++        _original_send_single_request = httpx.AsyncClient._send_single_request
++
++        async def patched_send_single_request(self, request):
++            # Check if the current transport is the default and we should replace it
++            transport_name = type(self._transport).__name__
++            if transport_name in ("HTTPCoreAsyncTransport", "AsyncHTTPTransport"):
++                try:
++                    # Replace with pycurl transport only if not already patched
++                    if not hasattr(self, "_pycurl_patched"):
++                        self._transport = AsyncPyCurlTransport()
++                        self._pycurl_patched = True
++                except ImportError:
++                    pass
++
++            return await _original_send_single_request(self, request)
++
++        httpx.AsyncClient._send_single_request = patched_send_single_request
++    except Exception:
++        # httpx_pycurl not available or error during patching
++        pass

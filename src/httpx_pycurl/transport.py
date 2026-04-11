@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 
 import anyio
 import certifi
-import httpx
 import pycurl
 import pycurl as _pycurl
+
+import httpx
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -108,6 +109,9 @@ def _parse_status_line(status_line: bytes | None) -> tuple[str, bytes]:
 
     parts = status_line.split(b" ", maxsplit=2)
     version = parts[0].split(b"/", maxsplit=1)[-1] if parts else b""
+    # Prepend "HTTP/" to match httpx's format
+    if version and not version.startswith(b"HTTP"):
+        version = b"HTTP/" + version
     reason = parts[2].decode("latin-1", errors="replace") if len(parts) == 3 else ""
     return reason, version
 

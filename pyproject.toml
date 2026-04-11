@@ -22,7 +22,8 @@ test = ["pytest-asyncio"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/httpx_pycurl"]
 
-[tool.pytest.ini_options]
+[tool.pytest]
+norecursedirs = ["httpx"]
 pythonpath = ["src"]
 
 [tool.ruff.lint]
