@@ -26,5 +26,8 @@ packages = ["src/httpx_pycurl"]
 norecursedirs = ["httpx"]
 pythonpath = ["src"]
 
+[tool.ruff]
+exclude = ["httpx"]
+
 [tool.ruff.lint]
 extend-select = ["I"]

@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import time
 
-import httpx
 import pytest
 
+import httpx
 from httpx_pycurl import transport
 
 
@@ -152,3 +152,77 @@ async def test_fetch_nginx_parallel_streaming_chunks(
         assert status_code == 200
         assert body_size in (1024, 16 * 1024, 1024 * 1024)
         assert chunk_count > 0
+
+
+@pytest.mark.parametrize("regular", [True, False])
+@pytest.mark.asyncio
+async def test_timeout_behavior(regular, slow_server):
+    """Test timeout behavior comparing httpx and pycurl transports.
+
+    Both should timeout with a short timeout against a slow server endpoint.
+    """
+    url = f"{slow_server}delay"
+    timeout = 0.5  # 500ms timeout
+
+    if regular:
+        # httpx AsyncHTTPTransport
+        client = httpx.AsyncClient(timeout=timeout)
+        transport_name = "httpx.AsyncHTTPTransport"
+    else:
+        # AsyncPyCurlTransport
+        client = httpx.AsyncClient(
+            transport=transport.AsyncPyCurlTransport(timeout=timeout)
+        )
+        transport_name = "AsyncPyCurlTransport"
+
+    async with client:
+        start = time.monotonic()
+        with pytest.raises(
+            (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TransportError)
+        ):
+            await client.get(url)
+        elapsed = time.monotonic() - start
+
+        # Verify timeout was triggered reasonably quickly (within 2x timeout window)
+        assert elapsed < timeout * 2 + 0.5, (
+            f"{transport_name} took too long: {elapsed:.2f}s"
+        )
+        print(f"{transport_name} timeout after {elapsed:.2f}s")
+
+
+@pytest.mark.parametrize("regular", [True, False])
+@pytest.mark.asyncio
+async def test_timeout_behavior_streaming(regular, slow_server):
+    """Test timeout behavior with streaming chunk iteration.
+
+    Both should timeout when iterating over response chunks with a slow server.
+    """
+    url = f"{slow_server}delay"
+    timeout = 0.5  # 500ms timeout
+
+    if regular:
+        # httpx AsyncHTTPTransport
+        client = httpx.AsyncClient(timeout=timeout)
+        transport_name = "httpx.AsyncHTTPTransport"
+    else:
+        # AsyncPyCurlTransport
+        client = httpx.AsyncClient(
+            transport=transport.AsyncPyCurlTransport(timeout=timeout)
+        )
+        transport_name = "AsyncPyCurlTransport"
+
+    async with client:
+        start = time.monotonic()
+        with pytest.raises(
+            (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TransportError)
+        ):
+            async with client.stream("GET", url) as response:
+                async for chunk in response.aiter_bytes(chunk_size=4096):
+                    pass  # Iterate through chunks
+        elapsed = time.monotonic() - start
+
+        # Verify timeout was triggered reasonably quickly
+        assert elapsed < timeout * 2 + 0.5, (
+            f"{transport_name} took too long: {elapsed:.2f}s"
+        )
+        print(f"{transport_name} streaming timeout after {elapsed:.2f}s")

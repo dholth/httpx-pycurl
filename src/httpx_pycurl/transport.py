@@ -4,7 +4,6 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from tempfile import SpooledTemporaryFile
-from threading import Event
 from typing import TYPE_CHECKING
 
 import anyio
