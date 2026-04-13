@@ -572,33 +572,13 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         self._multi = multi
         return multi
 
-    def _socket_callback(self, *args) -> int:
-
-        ints = [arg for arg in args if isinstance(arg, int)]
-        if len(ints) < 2:
-            return 0
-
-        first, second = ints[0], ints[1]
-        if first in {
-            _pycurl.POLL_IN,
-            _pycurl.POLL_OUT,
-            _pycurl.POLL_INOUT,
-            _pycurl.POLL_REMOVE,
-        }:
-            what = first
-            fd = second
-        else:
-            fd = first
-            what = second
-
-        self._set_socket_watch(fd, what)
+    def _socket_callback(self, what: int, socket: int, userp: object, socketp: object) -> int:
+        self._set_socket_watch(socket, what)
         return 0
 
-    def _timer_callback(self, *args) -> int:
+    def _timer_callback(self, timeout_ms: int) -> int:
         if self._loop is None:
             return 0
-
-        timeout_ms = next((arg for arg in args if isinstance(arg, int)), -1)
 
         if self._timer_handle is not None:
             self._timer_handle.cancel()
