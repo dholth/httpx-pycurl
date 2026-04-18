@@ -1,5 +1,5 @@
 name: Tests
-on: [push, pull_request]
+on: [ push, pull_request ]
 
 jobs:
   build-linux:
@@ -45,7 +45,7 @@ jobs:
           cd httpx-pycurl
           pytest
 
-      - name: Run httpx async tests with httpx-pycurl transport
+      - name: Run httpx tests with httpx-pycurl transport
         run: |
           cd httpx
-          pytest tests/client/test_async_client.py -k asyncio -v
+          pytest -k "not anyio and not test_main and not autodetect and not cp_1252 and not cp1252 and not explicit_encoding" -v

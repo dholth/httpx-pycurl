@@ -7,15 +7,34 @@ protocols built into `curl`. On my machine, `AsyncPyCurlTransport` performs
 better than `httpx`'s default `AsyncHttpTransport`, taking approximately 75% of
 the time to fetch 60 files from a local `nginx` test server.
 
-`httpx-pycurl` is in early development, started from an LLM-written draft
-implementation.
+`httpx-pycurl` is in early development, but it passes most `httpx` tests and has
+good performance. A `niquests`-derived test uses `asyncio.gather()` to make 1000
+http/2 requests to `https://httpbingo.org/get`. `httpx-pycurl` is about as fast.
+
+```
+# First run:
+Fetch 1000x https://httpbingo.org/get
+aiohttp: 1.029s
+httpx: 1.369s
+httpx_pycurl: 0.637s
+niquests: 0.715s
+
+# Second run:
+Fetch 1000x https://httpbingo.org/get
+aiohttp: 0.927s
+httpx: 1.346s
+httpx_pycurl: 0.677s
+niquests: 0.655s
+```
 
 ## Install
 
 ```bash
 pip install httpx-pycurl
 ```
+
 Or with conda,
+
 ```bash
 conda install -n base conda-pypi
 conda pypi install httpx-pycurl

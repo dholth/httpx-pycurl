@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING
 
 import anyio
 import certifi
+import httpx
 import pycurl
 import pycurl as _pycurl
-
-import httpx
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -192,15 +191,14 @@ def _parse_status_line(status_line: bytes | None) -> tuple[str, bytes]:
         return "", b""
 
     parts = status_line.split(b" ", maxsplit=2)
-    version = parts[0].split(b"/", maxsplit=1)[-1] if parts else b""
-    # Prepend "HTTP/" to match httpx's format
-    if version and not version.startswith(b"HTTP"):
-        version = b"HTTP/" + version
+    version = parts[0] if parts else b""
     reason = parts[2].decode("latin-1", errors="replace") if len(parts) == 3 else ""
     return reason, version
 
 
-def _map_pycurl_error(code: int, message: str) -> httpx.TransportError:
+def _map_pycurl_error(
+    code: int, message: str, curl: pycurl.Curl | None = None
+) -> httpx.TransportError:
     """Map pycurl error codes to appropriate httpx exceptions."""
     # pycurl error code 1 is UNSUPPORTED_PROTOCOL
     if code == _pycurl.E_UNSUPPORTED_PROTOCOL:
@@ -214,11 +212,20 @@ def _map_pycurl_error(code: int, message: str) -> httpx.TransportError:
     if code in (
         _pycurl.E_COULDNT_RESOLVE_HOST,
         _pycurl.E_COULDNT_CONNECT,
-        _pycurl.E_OPERATION_TIMEDOUT,
     ):
-        if code == _pycurl.E_OPERATION_TIMEDOUT:
-            return httpx.ConnectTimeout(f"Connection timeout: {message}")
         return httpx.ConnectError(f"Connection error: {message}")
+
+    if code == _pycurl.E_OPERATION_TIMEDOUT:
+        # Distinguish connect timeout from read timeout using connect time info.
+        # If connect_time is 0, the connection was never established -> ConnectTimeout.
+        if curl is not None:
+            try:
+                connect_time = curl.getinfo(_pycurl.CONNECT_TIME)
+                if connect_time > 0:
+                    return httpx.ReadTimeout(f"Read timeout: {message}")
+            except Exception:
+                pass
+        return httpx.ConnectTimeout(f"Connection timeout: {message}")
 
     # Default to TransportError
     return httpx.TransportError(f"pycurl error {code}: {message}")
@@ -240,6 +247,19 @@ def _configure_curl(
     async_stream: _AsyncQueueStream | None = None,
     body_reader: _RequestBodyReader | None = None,
 ):
+    # Apply per-request connect timeout from httpx extensions
+    ext_timeout = request.extensions.get("timeout", {})
+    connect_timeout = ext_timeout.get("connect")
+
+    if connect_timeout is not None:
+        curl.setopt(_pycurl.CONNECTTIMEOUT_MS, int(connect_timeout * 1000))
+    elif timeout is not None:
+        curl.setopt(_pycurl.CONNECTTIMEOUT_MS, int(timeout * 1000))
+
+    # Total transfer timeout from transport-level setting
+    if timeout is not None:
+        curl.setopt(_pycurl.TIMEOUT_MS, int(timeout * 1000))
+
     def header_callback(chunk: bytes) -> int:
         line = chunk.rstrip(b"\r\n")
         if not line:
@@ -271,8 +291,6 @@ def _configure_curl(
     curl.setopt(_pycurl.SSL_VERIFYHOST, 2 if verify else 0)
     # cost incurred when TLS connection is made
     curl.setopt(_pycurl.CAINFO, cainfo)
-    if timeout is not None:
-        curl.setopt(_pycurl.TIMEOUT_MS, int(timeout * 1000))
     if user_agent:
         curl.setopt(_pycurl.USERAGENT, user_agent)
 
@@ -409,7 +427,7 @@ class PyCurlTransport(httpx.BaseTransport):
         except _pycurl.error as error:
             context.response_body.close()
             code, message = error.args
-            raise _map_pycurl_error(code, str(message)) from error
+            raise _map_pycurl_error(code, str(message), curl) from error
         finally:
             curl.close()
 
@@ -521,7 +539,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             self._remove_transfer(curl)
             context.response_body.close()
             code, message = error.args
-            raise _map_pycurl_error(code, str(message)) from error
+            raise _map_pycurl_error(code, str(message), curl) from error
         except Exception:
             self._remove_transfer(curl)
             context.response_body.close()
@@ -572,7 +590,9 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         self._multi = multi
         return multi
 
-    def _socket_callback(self, what: int, socket: int, userp: object, socketp: object) -> int:
+    def _socket_callback(
+        self, what: int, socket: int, userp: object, socketp: object
+    ) -> int:
         self._set_socket_watch(socket, what)
         return 0
 
@@ -685,7 +705,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         _request, context, future = transfer
         context.response_body.close()
         if not future.done():
-            future.set_exception(_map_pycurl_error(code, message))
+            future.set_exception(_map_pycurl_error(code, message, curl))
         self._remove_handle_only(curl)
 
     def _remove_transfer(self, curl: pycurl.Curl):
