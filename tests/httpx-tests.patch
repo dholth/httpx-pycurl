@@ -1,46 +1,59 @@
---- httpx_fresh/tests/conftest.py	2026-04-11 14:01:04.396153925 -0400
-+++ httpx/tests/conftest.py	2026-04-11 13:57:52.634747616 -0400
-@@ -285,3 +285,73 @@
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 858bca1..b5d70c0 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -285,3 +285,84 @@ def server() -> typing.Iterator[TestServer]:
      config = Config(app=app, lifespan="off", loop="asyncio")
      server = TestServer(config=config)
      yield from serve_in_thread(server)
 +
 +
-+# Patch AsyncClient to use AsyncPyCurlTransport from httpx_pycurl
++# Patch Client and AsyncClient to use PyCurlTransport and AsyncPyCurlTransport
 +_pycurl_patched = False
 +
 +
 +def pytest_configure(config):
-+    """Patch httpx.AsyncClient to use AsyncPyCurlTransport for asyncio tests."""
++    """Patch httpx.Client to use PyCurlTransport and httpx.AsyncClient to use AsyncPyCurlTransport."""
 +    global _pycurl_patched
 +    try:
-+        from httpx_pycurl import AsyncPyCurlTransport
++        from httpx_pycurl import PyCurlTransport, AsyncPyCurlTransport
 +
-+        _original_init = httpx.AsyncClient.__init__
++        # Patch sync Client to use PyCurlTransport
++        _original_sync_init = httpx.Client.__init__
 +
-+        def patched_init(self, **kwargs):
++        def patched_sync_init(self, *args, **kwargs):
++            # If no transport is specified, we'll replace it with PyCurlTransport
++            _original_sync_init(self, *args, **kwargs)
++
++            # Check if the current transport is the default and replace it
++            transport_name = type(self._transport).__name__
++            if transport_name in ("HTTPCoreTransport", "HTTPTransport"):
++                try:
++                    # Replace with pycurl transport
++                    self._transport = PyCurlTransport()
++                except Exception as e:
++                    pass
++
++        httpx.Client.__init__ = patched_sync_init
++
++        # Patch AsyncClient to use AsyncPyCurlTransport
++        _original_async_init = httpx.AsyncClient.__init__
++
++        def patched_async_init(self, *args, **kwargs):
 +            # Apply original init first
-+            _original_init(self, **kwargs)
++            _original_async_init(self, *args, **kwargs)
++            # We'll replace transport at first request time to ensure event loop is running
 +
-+            # After initialization, check if running in asyncio and replace transport
-+            # The transport will be used later when the event loop is running
-+            import asyncio
-+            import sys
++        httpx.AsyncClient.__init__ = patched_async_init
 +
-+            # Check if we're in an asyncio-based test (pytest-asyncio or anyio with asyncio)
-+            # We can't reliably detect this at init time, so we'll use a different approach
-+            # Patch the _transport to be a lazy wrapper
-+            pass
-+
-+        # Instead of patching __init__, patch the _send_single_request to use our transport
++        # Patch AsyncClient._send_single_request to replace transport at request time
 +        _original_send_single_request = httpx.AsyncClient._send_single_request
 +
 +        async def patched_send_single_request(self, request):
 +            # Only use pycurl transport for asyncio, not for trio
-+            import sys
 +            import asyncio
 +
-+            # Check if we're in trio (sniffio would be better but it's optional)
++            # Check if we're in asyncio (sniffio would be better but it's optional)
 +            try:
 +                asyncio.get_running_loop()
 +                # We're in asyncio, safe to use pycurl
@@ -61,7 +74,7 @@
 +                        old_transport = self._transport
 +                        self._transport = AsyncPyCurlTransport()
 +                        self._pycurl_patched = True
-+                except ImportError as e:
++                except Exception as e:
 +                    pass
 +
 +            return await _original_send_single_request(self, request)
