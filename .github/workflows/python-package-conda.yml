@@ -1,6 +1,7 @@
 name: Tests
 on: [ push, pull_request ]
-
+env:
+  CONDA_QUIET: "1"
 jobs:
   build-linux:
     name: Tests
