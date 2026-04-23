@@ -41,17 +41,25 @@ class _TransferContext:
 
 class _RequestBodyReader:
     def __init__(self, stream: Iterable[bytes] | AsyncIterator[bytes]):
-        # Check if stream is async
-        if hasattr(stream, "__aiter__"):
-            # For async streams, we'll collect all chunks upfront
-            # This is necessary because pycurl's READFUNCTION is synchronous
+        # Check if stream is async - prefer __iter__ for sync streams
+        # httpx.ByteStream has both __iter__ and __aiter__, so we need to check
+        # for __iter__ first to handle sync streams properly
+        if hasattr(stream, "__iter__"):
+            # Sync stream
+            self._iterator = iter(stream)
+            self._is_async = False
+            self._async_stream = None
+            self._chunks = []
+        elif hasattr(stream, "__aiter__"):
+            # Async stream (only if not also iterable)
             self._iterator = None
             self._is_async = True
             self._async_stream = stream
             self._chunks = []
             self._chunks_consumed = False
         else:
-            self._iterator = iter(stream)
+            # Unknown stream type, treat as empty
+            self._iterator = iter([])
             self._is_async = False
             self._async_stream = None
             self._chunks = []
@@ -206,6 +214,9 @@ def _map_pycurl_error(
 
     # URL format errors
     if code == _pycurl.E_URL_MALFORMAT or code == _pycurl.E_BAD_FUNCTION_ARGUMENT:
+        # Check if it's a port-related error
+        if "port" in message.lower():
+            return httpx.ConnectError(f"Connection error: {message}")
         return httpx.LocalProtocolError(f"Invalid URL: {message}")
 
     # Connection/timeout errors
@@ -250,15 +261,19 @@ def _configure_curl(
     # Apply per-request connect timeout from httpx extensions
     ext_timeout = request.extensions.get("timeout", {})
     connect_timeout = ext_timeout.get("connect")
+    read_timeout = ext_timeout.get("read")
+    pool_timeout = ext_timeout.get("pool")
 
     if connect_timeout is not None:
         curl.setopt(_pycurl.CONNECTTIMEOUT_MS, int(connect_timeout * 1000))
     elif timeout is not None:
         curl.setopt(_pycurl.CONNECTTIMEOUT_MS, int(timeout * 1000))
 
-    # Total transfer timeout from transport-level setting
-    if timeout is not None:
-        curl.setopt(_pycurl.TIMEOUT_MS, int(timeout * 1000))
+    # Use transport-level timeout if specified, otherwise use read timeout from request
+    # pycurl's TIMEOUT_MS sets the maximum time for the entire operation
+    effective_timeout = timeout if timeout is not None else read_timeout
+    if effective_timeout is not None:
+        curl.setopt(_pycurl.TIMEOUT_MS, int(effective_timeout * 1000))
 
     def header_callback(chunk: bytes) -> int:
         line = chunk.rstrip(b"\r\n")
@@ -375,6 +390,7 @@ class PyCurlTransport(httpx.BaseTransport):
         verbose: bool = False,
         debug_callback: Callable[[int, bytes], None] | None = None,
         debug_logger: logging.Logger | None = None,
+        cainfo: str | None = None,
     ):
         self._timeout = timeout
         self._verify = verify
@@ -383,6 +399,7 @@ class PyCurlTransport(httpx.BaseTransport):
         self._verbose = verbose
         self._debug_callback = debug_callback
         self._debug_logger = debug_logger
+        self._cainfo = cainfo or certifi.where()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         curl_response = self._perform_request(request)
@@ -409,6 +426,9 @@ class PyCurlTransport(httpx.BaseTransport):
 
         curl = _pycurl.Curl()
         try:
+            # Create a body reader for the request
+            body_reader = _RequestBodyReader(request.stream)
+
             _configure_curl(
                 curl,
                 request,
@@ -420,6 +440,8 @@ class PyCurlTransport(httpx.BaseTransport):
                 verbose=self._verbose,
                 debug_callback=self._debug_callback,
                 debug_logger=self._debug_logger,
+                cainfo=self._cainfo,
+                body_reader=body_reader,
             )
 
             curl.perform()
