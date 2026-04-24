@@ -696,8 +696,14 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         return multi
 
     def _socket_callback(
-        self, what: int, fd: int, userp: object, socketp: object
+        self, what: int, fd: int, multi: pycurl.CurlMulti, socketp: object
     ) -> int:
+        # Set socketp to associate fd with object in libcurl.
+        # Triggers recursive callback, not very useful in Python.
+        # if socketp is None:
+        #     mresult = multi.assign(fd, "Socket thing")
+        #     print(mresult)
+        #     return 0
         self._socket_watcher.register(
             fd, what, self._on_socket_readable, self._on_socket_writable
         )
