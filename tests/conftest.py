@@ -118,10 +118,10 @@ class SlowHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/plain")
                 self.send_header("Content-Length", len(body) * 2)
                 self.end_headers()
-                time.sleep(0.1)
+                time.sleep(0.01)
                 self.wfile.write(body)
                 self.wfile.flush()
-                time.sleep(0.1)
+                time.sleep(0.01)
                 self.wfile.write(body)
                 self.wfile.flush()
             elif self.path == "/short":

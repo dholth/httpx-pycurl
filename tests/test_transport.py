@@ -260,8 +260,8 @@ async def test_streaming_chunk_timing(slow_server):
     
     This test verifies that we can:
     1. Receive the response immediately
-    2. Receive the first chunk about 0.1 seconds later
-    3. Receive the second chunk about 0.1 seconds later
+    2. Receive the first chunk about 0.01 seconds later
+    3. Receive the second chunk about 0.01 seconds later
     
     This tests whether the transport supports true streaming (returning
     early from perform()) rather than buffering all data.
@@ -297,25 +297,25 @@ async def test_streaming_chunk_timing(slow_server):
         print(f"First chunk received after: {chunk_times[0][0]:.3f}s")
         print(f"Second chunk received after: {chunk_times[1][0]:.3f}s")
         
-        # Verify timing: chunks should arrive approximately 0.1s apart
+        # Verify timing: chunks should arrive approximately 0.01s apart
         # with some tolerance for timing variations
         first_chunk_time = chunk_times[0][0]
         second_chunk_time = chunk_times[1][0]
         
-        # First chunk should arrive around 0.1s after response
-        # (server delays 0.1s before sending first chunk)
+        # First chunk should arrive around 0.01s after response
+        # (server delays 0.01s before sending first chunk)
         assert (
-            0.05 < first_chunk_time < 0.3
-        ), f"First chunk timing unexpected: {first_chunk_time:.3f}s (expected ~0.1s)"
+            0.005 < first_chunk_time < 0.03
+        ), f"First chunk timing unexpected: {first_chunk_time:.3f}s (expected ~0.01s)"
         
-        # Second chunk should arrive around 0.2s total
-        # (server delays 0.1s, sends chunk, waits 0.1s, sends chunk)
+        # Second chunk should arrive around 0.02s total
+        # (server delays 0.01s, sends chunk, waits 0.01s, sends chunk)
         assert (
-            0.15 < second_chunk_time < 0.4
-        ), f"Second chunk timing unexpected: {second_chunk_time:.3f}s (expected ~0.2s)"
+            0.015 < second_chunk_time < 0.04
+        ), f"Second chunk timing unexpected: {second_chunk_time:.3f}s (expected ~0.02s)"
         
-        # The gap between chunks should be around 0.1s
+        # The gap between chunks should be around 0.01s
         chunk_gap = second_chunk_time - first_chunk_time
         assert (
-            0.05 < chunk_gap < 0.25
-        ), f"Chunk gap unexpected: {chunk_gap:.3f}s (expected ~0.1s)"
+            0.005 < chunk_gap < 0.025
+        ), f"Chunk gap unexpected: {chunk_gap:.3f}s (expected ~0.01s)"

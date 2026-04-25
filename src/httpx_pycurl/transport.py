@@ -38,6 +38,8 @@ class _TransferContext:
     status_line: bytes | None = None
     response_headers: list[tuple[bytes, bytes]] = field(default_factory=list)
     async_stream: _AsyncQueueStream | None = None
+    headers_ready: asyncio.Event | None = None
+    headers_complete: bool = False
 
 
 @dataclass
@@ -295,10 +297,16 @@ def _configure_curl(
     def header_callback(chunk: bytes) -> int:
         line = chunk.rstrip(b"\r\n")
         if not line:
+            # Blank line indicates end of headers
+            if context.status_line is not None and not context.headers_complete:
+                context.headers_complete = True
+                if context.headers_ready is not None:
+                    context.headers_ready.set()
             return len(chunk)
         if line.startswith(b"HTTP/"):
             context.status_line = line
             context.response_headers.clear()
+            context.headers_complete = False
             return len(chunk)
         key, sep, value = line.partition(b":")
         if sep:
@@ -534,6 +542,11 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         # Create async queue stream for streaming response bodies if enabled
         async_stream = _AsyncQueueStream(loop) if self._stream_response else None
         context.async_stream = async_stream
+        
+        # Create event for signaling when headers are ready
+        # This allows returning response early for streaming
+        if self._stream_response:
+            context.headers_ready = asyncio.Event()
 
         try:
             # Pre-consume async request streams
@@ -565,8 +578,60 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             perform_error = None
 
             try:
-                # Perform the transfer via AsyncCurl
-                await self._curl.perform(curl)
+                # If streaming is enabled, we want to return early when headers are ready
+                # Run perform concurrently with waiting for headers
+                early_return = False
+                if async_stream is not None and context.headers_ready is not None:
+                    # Start the perform task
+                    perform_task = asyncio.create_task(self._curl.perform(curl))
+                    # Create a task that waits for headers to be ready
+                    headers_wait_task = asyncio.create_task(context.headers_ready.wait())
+                    
+                    # Wait for either headers to be ready or perform to complete
+                    done, pending = await asyncio.wait(
+                        [perform_task, headers_wait_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    
+                    # Check if perform completed with error
+                    perform_error_temp = None
+                    for task in done:
+                        if task is perform_task:
+                            try:
+                                await task
+                            except pycurl.error as error:
+                                code, message = error.args
+                                perform_error_temp = _map_pycurl_error(code, str(message), curl)
+                            break
+                    
+                    # If we have headers ready and status code, finalize early response
+                    if context.headers_complete and context.status_line is not None and not perform_task.done():
+                        # Headers completed but perform not done - return early
+                        curl_response = _finalize_curl_response(curl, context)
+                        # Create response
+                        response = httpx.Response(
+                            status_code=curl_response.status_code,
+                            headers=curl_response.headers,
+                            stream=curl_response.body_stream or _FileStream(curl_response.body_file),
+                            request=request,
+                            extensions={"http_version": curl_response.http_version},
+                        )
+                        # Mark that we're doing early return so cleanup happens in background
+                        early_return = True
+                        # Schedule background cleanup (this will signal end of stream when perform completes)
+                        asyncio.create_task(self._background_perform_cleanup(curl, perform_task, context, async_stream))
+                        return response
+                    
+                    # If perform completed (either success or failure), proceed to normal handling
+                    if perform_task.done():
+                        perform_error = perform_error_temp
+                    else:
+                        # Headers not ready and perform not done - this shouldn't happen normally
+                        # but wait for perform to complete
+                        await perform_task
+                else:
+                    # Normal path: wait for perform to complete
+                    await self._curl.perform(curl)
             except pycurl.error as error:
                 code, message = error.args
                 # Store the error to signal it later via the stream
@@ -574,9 +639,11 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             finally:
                 # Finalize response and clean up
                 try:
-                    curl_response = _finalize_curl_response(curl, context)
+                    if curl_response is None:  # Only finalize if not already done
+                        curl_response = _finalize_curl_response(curl, context)
                     # Signal end of stream if using async streaming
-                    if async_stream is not None:
+                    # But NOT if we did early return (background task handles it)
+                    if async_stream is not None and not early_return:
                         if perform_error is not None:
                             # If transfer failed, queue the error before the sentinel
                             try:
@@ -589,7 +656,9 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                     context.response_body.close()
                     raise
                 finally:
-                    self._transfers.pop(curl, None)
+                    # Only pop from transfers if not doing early return
+                    if not early_return:
+                        self._transfers.pop(curl, None)
 
             # If perform() failed but we got a response (partial data received),
             # we should still return the response and let the stream signal the error
@@ -642,3 +711,33 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             except Exception:
                 pass
         self._transfers.clear()
+    
+    async def _background_perform_cleanup(
+        self,
+        curl: pycurl.Curl,
+        perform_task: asyncio.Task,
+        context: _TransferContext,
+        async_stream: _AsyncQueueStream | None,
+    ) -> None:
+        """Clean up after perform completes in the background."""
+        try:
+            await perform_task
+        except pycurl.error as error:
+            code, message = error.args
+            perform_error = _map_pycurl_error(code, str(message), curl)
+            # Queue error to be read from stream
+            if async_stream is not None:
+                try:
+                    async_stream._queue.put_nowait(perform_error)
+                except asyncio.QueueFull:
+                    pass
+        finally:
+            # Signal end of stream
+            if async_stream is not None:
+                async_stream.signal_end_of_stream()
+            # Clean up transfer tracking
+            self._transfers.pop(curl, None)
+            try:
+                curl.close()
+            except Exception:
+                pass
