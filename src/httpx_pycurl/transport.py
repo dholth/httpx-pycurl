@@ -248,6 +248,10 @@ def _map_pycurl_error(
                 pass
         return httpx.ConnectTimeout(f"Connection timeout: {message}")
 
+    # Remote protocol errors
+    if code == pycurl.E_PARTIAL_FILE:
+        return httpx.RemoteProtocolError(f"{message}")
+
     # Default to TransportError
     return httpx.TransportError(f"pycurl error {code}: {message}")
 
