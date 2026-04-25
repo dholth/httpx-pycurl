@@ -250,7 +250,7 @@ async def test_response_closed_early(regular, slow_server):
         start = time.monotonic()
         # httpx's default transport may raise ReadTimeout if timeout fires first,
         # while pycurl raises RemoteProtocolError when server closes early
-        with pytest.raises((httpx.RemoteProtocolError, httpx.ReadTimeout)):
+        with pytest.raises(httpx.RemoteProtocolError):
             async with client.stream("GET", url) as response:
                 async for chunk in response.aiter_bytes():
                     pass  # Consume all chunks
