@@ -110,6 +110,20 @@ class SlowHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/plain")
                 self.end_headers()
                 self.wfile.write(b"Delayed response after 60 seconds\n")
+            elif self.path == "/stream":
+                # Send some headers; wait; send response. To test true
+                # streaming responses.
+                body = b"OK\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", len(body) * 2)
+                self.end_headers()
+                time.sleep(0.1)
+                self.wfile.write(body)
+                self.wfile.flush()
+                time.sleep(0.1)
+                self.wfile.write(body)
+                self.wfile.flush()
             elif self.path == "/short":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
@@ -117,7 +131,6 @@ class SlowHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"short response\n")
                 self.wfile.flush()
-                # time.sleep(0.1)  # help with race condition getting content vs error?
                 raise TimeoutError("early close from server")
             else:
                 body = b"OK\n"

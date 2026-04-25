@@ -252,3 +252,70 @@ async def test_response_closed_early(regular, short_server):
                     chunks.append(chunk)
 
         assert chunks == [b"short response\n"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_chunk_timing(slow_server):
+    """Test that streaming chunks are received at the expected times.
+    
+    This test verifies that we can:
+    1. Receive the response immediately
+    2. Receive the first chunk about 0.1 seconds later
+    3. Receive the second chunk about 0.1 seconds later
+    
+    This tests whether the transport supports true streaming (returning
+    early from perform()) rather than buffering all data.
+    """
+    url = f"{slow_server}stream"
+    
+    async with httpx.AsyncClient(
+        transport=transport.AsyncPyCurlTransport()
+    ) as client:
+        # Record when we start
+        response_received_time = None
+        chunk_times = []
+        
+        # Start streaming
+        start_time = time.monotonic()
+        async with client.stream("GET", url) as response:
+            # Record when response headers are received
+            response_received_time = time.monotonic() - start_time
+            assert response.status_code == 200
+            
+            # Iterate through chunks and record timing
+            async for chunk in response.aiter_bytes():
+                chunk_time = time.monotonic() - start_time
+                chunk_times.append((chunk_time, chunk))
+        
+        # Verify we got exactly 2 chunks, each containing b"OK\n"
+        assert len(chunk_times) == 2, f"Expected 2 chunks, got {len(chunk_times)}"
+        assert chunk_times[0][1] == b"OK\n", f"First chunk: {chunk_times[0][1]}"
+        assert chunk_times[1][1] == b"OK\n", f"Second chunk: {chunk_times[1][1]}"
+        
+        # Print timing information
+        print(f"\nResponse received after: {response_received_time:.3f}s")
+        print(f"First chunk received after: {chunk_times[0][0]:.3f}s")
+        print(f"Second chunk received after: {chunk_times[1][0]:.3f}s")
+        
+        # Verify timing: chunks should arrive approximately 0.1s apart
+        # with some tolerance for timing variations
+        first_chunk_time = chunk_times[0][0]
+        second_chunk_time = chunk_times[1][0]
+        
+        # First chunk should arrive around 0.1s after response
+        # (server delays 0.1s before sending first chunk)
+        assert (
+            0.05 < first_chunk_time < 0.3
+        ), f"First chunk timing unexpected: {first_chunk_time:.3f}s (expected ~0.1s)"
+        
+        # Second chunk should arrive around 0.2s total
+        # (server delays 0.1s, sends chunk, waits 0.1s, sends chunk)
+        assert (
+            0.15 < second_chunk_time < 0.4
+        ), f"Second chunk timing unexpected: {second_chunk_time:.3f}s (expected ~0.2s)"
+        
+        # The gap between chunks should be around 0.1s
+        chunk_gap = second_chunk_time - first_chunk_time
+        assert (
+            0.05 < chunk_gap < 0.25
+        ), f"Chunk gap unexpected: {chunk_gap:.3f}s (expected ~0.1s)"
