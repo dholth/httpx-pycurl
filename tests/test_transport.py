@@ -230,9 +230,9 @@ async def test_timeout_behavior_streaming(regular, slow_server):
 
 @pytest.mark.parametrize("regular", [True, False])
 @pytest.mark.asyncio
-async def test_response_closed_early(regular, slow_server):
+async def test_response_closed_early(regular, short_server):
     """Test error behavior when server closes before content-length bytes were delivered."""
-    url = f"{slow_server}short"
+    url = f"{short_server}short"
     timeout = 0.5  # 500ms timeout
 
     if regular:

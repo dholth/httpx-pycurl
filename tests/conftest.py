@@ -117,7 +117,7 @@ class SlowHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"short response\n")
                 self.wfile.flush()
-                time.sleep(0.1) # help with race condition getting content vs error?
+                # time.sleep(0.1)  # help with race condition getting content vs error?
                 raise TimeoutError("early close from server")
             else:
                 body = b"OK\n"
@@ -133,8 +133,7 @@ class SlowHandler(BaseHTTPRequestHandler):
         pass  # Suppress logging
 
 
-@pytest.fixture(scope="session")
-def slow_server():
+def py_server():
     """Start a simple HTTP server that delays responses."""
     server = HTTPServer(("127.0.0.1", 0), SlowHandler)
     host, port = server.server_address
@@ -150,3 +149,17 @@ def slow_server():
     SlowHandler.shutdown_flag = True
     server.shutdown()
     thread.join(timeout=5.0)
+
+
+@pytest.fixture(scope="session")
+def slow_server():
+    yield from py_server()
+
+
+@pytest.fixture()
+def short_server():
+    """
+    'short response' behavior seems to break with session-scoped
+    slow_server(), so here's a function-scoped version.
+    """
+    yield from py_server()
