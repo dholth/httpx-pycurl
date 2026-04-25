@@ -11,12 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
 
 import pycurl
 
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
