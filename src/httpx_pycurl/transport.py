@@ -517,7 +517,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
 
         # Lazily initialize AsyncCurl on first request
         if self._curl is None:
-            self._curl = AsyncCurl(loop)
+            self._curl = AsyncCurl(loop, max_connections=self._max_connections)
 
         context = _TransferContext(
             response_body=SpooledTemporaryFile(max_size=1024 * 1024)
