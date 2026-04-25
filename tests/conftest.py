@@ -116,7 +116,8 @@ class SlowHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", 100)
                 self.end_headers()
                 self.wfile.write(b"short response\n")
-                # self.wfile.close()  # also triggers error here
+                self.wfile.flush()
+                time.sleep(0.1) # help with race condition getting content vs error?
                 raise TimeoutError("early close from server")
             else:
                 body = b"OK\n"
