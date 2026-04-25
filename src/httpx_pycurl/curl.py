@@ -1,8 +1,10 @@
-"""Low-level async wrapper around pycurl.CurlMulti.
+"""
+Low-level async wrapper around pycurl.CurlMulti.
 
-AsyncCurl manages a CurlMulti handle and wires socket/timer callbacks into
-an asyncio event loop. It knows nothing about httpx - just handles curl
-transfer lifecycle and completion signaling.
+AsyncCurl manages a CurlMulti handle and wires socket/timer callbacks
+into an asyncio event loop. Caller is responsible for initializing curl
+handle and translating response to a higher-level framework; this only
+handles transfer lifecycle and completion signaling.
 """
 
 from __future__ import annotations
