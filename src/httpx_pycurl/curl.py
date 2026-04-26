@@ -168,7 +168,26 @@ class AsyncCurl:
 
     def _register_socket(self, fd: int, what: int) -> None:
         """Register socket with event loop based on event mask."""
-        # Always clean up previous registration
+        current_mode = self._socket_watch.get(fd)
+
+        if what == pycurl.POLL_REMOVE:
+            if current_mode is not None:
+                try:
+                    self._loop.remove_reader(fd)
+                except (ValueError, RuntimeError):
+                    pass
+                try:
+                    self._loop.remove_writer(fd)
+                except (ValueError, RuntimeError):
+                    pass
+                self._socket_watch.pop(fd, None)
+            return
+
+        # Skip if mode hasn't changed
+        if current_mode == what:
+            return
+
+        # Clean up previous registration (only necessary if mode changed)
         try:
             self._loop.remove_reader(fd)
         except (ValueError, RuntimeError):
@@ -177,10 +196,6 @@ class AsyncCurl:
             self._loop.remove_writer(fd)
         except (ValueError, RuntimeError):
             pass
-
-        if what == pycurl.POLL_REMOVE:
-            self._socket_watch.pop(fd, None)
-            return
 
         self._socket_watch[fd] = what
 

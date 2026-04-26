@@ -66,7 +66,7 @@ async def test_asynccurl_perform_when_closed():
 
     handle = pycurl.Curl()
     with pytest.raises(RuntimeError, match="AsyncCurl is closed"):
-        await curl.perform(handle)
+        curl.perform(handle)
 
 
 @pytest.mark.asyncio
@@ -112,7 +112,11 @@ async def test_asynccurl_perform_with_simple_handle():
     handle.setopt(pycurl.TIMEOUT, 2)
 
     try:
-        result = await asyncio.wait_for(curl_obj.perform(handle), timeout=10)
+        # perform() returns immediately with a PerformHandle; wait_for_completion() is awaitable
+        perform_handle = curl_obj.perform(handle)
+        assert perform_handle.curl is handle
+        # Wait for the transfer to complete
+        result = await asyncio.wait_for(curl_obj.wait_for_completion(perform_handle), timeout=10)
         assert result is handle
     finally:
         await curl_obj.aclose()
