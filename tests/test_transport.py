@@ -10,11 +10,9 @@ from httpx_pycurl import transport
 
 
 @pytest.mark.asyncio
-async def test_async_multi_socket_transport(monkeypatch: pytest.MonkeyPatch):
-    # logging.basicConfig(level=logging.DEBUG)
-
-    async with transport.AsyncPyCurlTransport() as tx:
-        request = httpx.Request("GET", "http://www.example.com/")
+async def test_async_multi_socket_transport(ca_cert, server):
+    async with transport.AsyncPyCurlTransport(cainfo=ca_cert) as tx:
+        request = httpx.Request("GET", server)
 
         response = await tx.handle_async_request(request)
 
@@ -257,65 +255,63 @@ async def test_response_closed_early(regular, short_server):
 @pytest.mark.asyncio
 async def test_streaming_chunk_timing(slow_server):
     """Test that streaming chunks are received at the expected times.
-    
+
     This test verifies that we can:
     1. Receive the response immediately
     2. Receive the first chunk about 0.01 seconds later
     3. Receive the second chunk about 0.01 seconds later
-    
+
     This tests whether the transport supports true streaming (returning
     early from perform()) rather than buffering all data.
     """
     url = f"{slow_server}stream"
-    
-    async with httpx.AsyncClient(
-        transport=transport.AsyncPyCurlTransport()
-    ) as client:
+
+    async with httpx.AsyncClient(transport=transport.AsyncPyCurlTransport()) as client:
         # Record when we start
         response_received_time = None
         chunk_times = []
-        
+
         # Start streaming
         start_time = time.monotonic()
         async with client.stream("GET", url) as response:
             # Record when response headers are received
             response_received_time = time.monotonic() - start_time
             assert response.status_code == 200
-            
+
             # Iterate through chunks and record timing
             async for chunk in response.aiter_bytes():
                 chunk_time = time.monotonic() - start_time
                 chunk_times.append((chunk_time, chunk))
-        
+
         # Verify we got exactly 2 chunks, each containing b"OK\n"
         assert len(chunk_times) == 2, f"Expected 2 chunks, got {len(chunk_times)}"
         assert chunk_times[0][1] == b"OK\n", f"First chunk: {chunk_times[0][1]}"
         assert chunk_times[1][1] == b"OK\n", f"Second chunk: {chunk_times[1][1]}"
-        
+
         # Print timing information
         print(f"\nResponse received after: {response_received_time:.3f}s")
         print(f"First chunk received after: {chunk_times[0][0]:.3f}s")
         print(f"Second chunk received after: {chunk_times[1][0]:.3f}s")
-        
+
         # Verify timing: chunks should arrive approximately 0.01s apart
         # with some tolerance for timing variations
         first_chunk_time = chunk_times[0][0]
         second_chunk_time = chunk_times[1][0]
-        
+
         # First chunk should arrive around 0.01s after response
         # (server delays 0.01s before sending first chunk)
-        assert (
-            0.005 < first_chunk_time < 0.03
-        ), f"First chunk timing unexpected: {first_chunk_time:.3f}s (expected ~0.01s)"
-        
+        assert 0.005 < first_chunk_time < 0.03, (
+            f"First chunk timing unexpected: {first_chunk_time:.3f}s (expected ~0.01s)"
+        )
+
         # Second chunk should arrive around 0.02s total
         # (server delays 0.01s, sends chunk, waits 0.01s, sends chunk)
-        assert (
-            0.015 < second_chunk_time < 0.04
-        ), f"Second chunk timing unexpected: {second_chunk_time:.3f}s (expected ~0.02s)"
-        
+        assert 0.015 < second_chunk_time < 0.04, (
+            f"Second chunk timing unexpected: {second_chunk_time:.3f}s (expected ~0.02s)"
+        )
+
         # The gap between chunks should be around 0.01s
         chunk_gap = second_chunk_time - first_chunk_time
-        assert (
-            0.005 < chunk_gap < 0.025
-        ), f"Chunk gap unexpected: {chunk_gap:.3f}s (expected ~0.01s)"
+        assert 0.005 < chunk_gap < 0.025, (
+            f"Chunk gap unexpected: {chunk_gap:.3f}s (expected ~0.01s)"
+        )
