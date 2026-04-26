@@ -11,7 +11,7 @@ from httpx_pycurl import transport
 
 @pytest.mark.asyncio
 async def test_async_multi_socket_transport(ca_cert, server):
-    async with transport.AsyncPyCurlTransport(cainfo=ca_cert) as tx:
+    async with transport.AsyncPyCurlTransport(cainfo=ca_cert, timeout=2) as tx:
         request = httpx.Request("GET", server)
 
         response = await tx.handle_async_request(request)
