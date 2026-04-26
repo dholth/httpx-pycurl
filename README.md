@@ -3,42 +3,11 @@
 `httpx-pycurl` provides an `httpx` transport that executes requests with
 `pycurl`.  It combines the [goodness of curl](https://everything.curl.dev/) with
 the familiar `httpx` API, including support for `http/2` and even non-http
-protocols built into `curl`. On my machine, `AsyncPyCurlTransport` performs
-better than `httpx`'s default `AsyncHttpTransport`, taking approximately 75% of
-the time to fetch 60 files from a local `nginx` test server.
-
-`httpx-pycurl` is in early development, but it passes most `httpx` tests and has
-good performance. A `niquests`-derived test uses `asyncio.gather()` to make 1000
-http/2 requests to `https://httpbingo.org/get`. `httpx-pycurl` is about as fast.
-
-```
-# First run:
-Fetch 1000x https://httpbingo.org/get
-aiohttp: 1.029s
-httpx: 1.369s
-httpx_pycurl: 0.637s
-niquests: 0.715s
-
-# Second run:
-Fetch 1000x https://httpbingo.org/get
-aiohttp: 0.927s
-httpx: 1.346s
-httpx_pycurl: 0.677s
-niquests: 0.655s
-```
-
-## Install
-
-```bash
-pip install httpx-pycurl
-```
-
-Or with conda,
-
-```bash
-conda install -n base conda-pypi
-conda pypi install httpx-pycurl
-```
+protocols built into `curl`. `AsyncPyCurlTransport` performs better than
+`httpx`'s default `AsyncHttpTransport` with `http2=True`, taking about 78% of
+the time to issue 128 requests in parallel. Under heavier usage `httpx-pycurl`
+appears to pull further ahead of alternative libraries, without replacing all of
+`httpx`; just `httpx`'s transport.
 
 ## Usage
 
@@ -80,4 +49,68 @@ debug_transport = PyCurlTransport(
     verbose=True,
     debug_callback=lambda info_type, data: print(info_type, data),
 )
+```
+
+## Installation
+
+```bash
+pip install httpx-pycurl
+```
+
+Or with conda,
+
+```bash
+conda install -n base conda-pypi
+conda pypi install httpx-pycurl
+```
+
+## Performance
+
+`httpx-pycurl` is in early development but it passes most `httpx` tests and has
+good performance. Our `tests/bench.py` uses `asyncio.gather()` to make many
+`http/2` requests to `https://httpbingo.org/get` using `httpx`, `niquests`, and
+`httpx` with `httpx-pycurl`'s transport. `httpx-pycurl` is the fastest library
+tested.
+
+Running `tests/bench.py [N]` shows that the more efficient `http/2` libraries
+shine when performing large numbers of parallel requests, and are closer
+together when only groups of 128 parallel requests are made.
+
+```
+2 groups of 512 requests each...
+
+Time per group:
+httpx: 0.679s ± 0.119s
+niquests: 0.432s ± 0.140s
+httpx_pycurl: 0.299s ± 0.056s
+
+Paired t-test: httpx_pycurl vs niquests
+t-stat: -2.249 (approx p < 0.05 if |t| > 2.365)
+Speedup: 1.44x
+```
+
+```
+4 groups of 256 requests each...
+
+Time per group:
+httpx: 0.378s ± 0.077s
+niquests: 0.259s ± 0.064s
+httpx_pycurl: 0.190s ± 0.034s
+
+Paired t-test: httpx_pycurl vs niquests
+t-stat: -4.208 (approx p < 0.05 if |t| > 2.365)
+Speedup: 1.36x
+```
+
+```
+8 groups of 128 requests each...
+
+Time per group:
+httpx: 0.215s ± 0.073s
+niquests: 0.205s ± 0.038s
+httpx_pycurl: 0.162s ± 0.033s
+
+Paired t-test: httpx_pycurl vs niquests
+t-stat: -8.949 (approx p < 0.05 if |t| > 2.365)
+Speedup: 1.27x
 ```

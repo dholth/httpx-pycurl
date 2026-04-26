@@ -4,6 +4,7 @@ Compare httpx, httpx_pycurl and niquests.
 
 import asyncio
 import statistics
+import sys
 import time
 
 import httpx
@@ -16,14 +17,14 @@ URL = "https://httpbingo.org/get"
 USER_AGENT = "httpx-pycurl (bench)"
 DEFAULT_HEADERS = {"User-Agent": USER_AGENT}
 
-# Make 1024 total requests for each library in groups. niquests seems to shine
-# when batch sizes are large. When batch sizes are smaller, i.e. 128 requests
-# each, vanilla httpx and niquests seem to be closer.
-PARTITIONS = 4
-COUNT = 1024 // PARTITIONS
+
+async def get_one(client, url):
+    response = await client.get(url)
+    assert len(response.content)
+    return response.content
 
 
-async def bench():
+async def bench(PARTITIONS, COUNT):
     """
     Make COUNT requests using each of several clients. Print time taken by each.
     """
@@ -54,7 +55,7 @@ async def bench():
         for client, name in clients:
             begin = time.perf_counter_ns()
             # async with client as client:
-            await asyncio.gather(*(client.get(URL) for _ in range(COUNT)))
+            await asyncio.gather(*(get_one(client, URL) for _ in range(COUNT)))
             end = time.perf_counter_ns()
             results_by_client[name].append((end - begin) / 1e9)
 
@@ -79,4 +80,14 @@ async def bench():
 
 
 if __name__ == "__main__":
-    asyncio.run(bench())
+    # niquests seems to shine when batch sizes are large. When batch sizes are
+    # smaller, i.e. 128 requests each, vanilla httpx and niquests seem to be
+    # closer.
+
+    PARTITIONS = 4
+    if len(sys.argv) == 2:
+        PARTITIONS = int(sys.argv[1])
+
+    COUNT = 1024 // PARTITIONS
+
+    asyncio.run(bench(PARTITIONS, COUNT))
