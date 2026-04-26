@@ -25,15 +25,12 @@ class AsyncCurl:
     pycurl.error on failure.
     """
 
-    def __init__(
-        self, loop: asyncio.AbstractEventLoop | None = None, max_connections: int = 100
-    ):
+    def __init__(self, loop: asyncio.AbstractEventLoop | None = None):
         """Initialize AsyncCurl.
 
         Args:
             loop: Optional event loop. If None, detected from get_running_loop().
                   AsyncCurl is one-time-use and initializes multi/loop eagerly.
-            max_connections: Maximum total connections for the multi handle.
 
         Raises:
             RuntimeError: If no event loop is available and none provided.
@@ -52,8 +49,6 @@ class AsyncCurl:
 
         # Create multi handle immediately
         self._multi = pycurl.CurlMulti()
-        if hasattr(pycurl, "M_MAX_TOTAL_CONNECTIONS"):
-            self._multi.setopt(pycurl.M_MAX_TOTAL_CONNECTIONS, max_connections)
         self._multi.setopt(pycurl.M_SOCKETFUNCTION, self._socket_callback)
         self._multi.setopt(pycurl.M_TIMERFUNCTION, self._timer_callback)
 
@@ -65,6 +60,12 @@ class AsyncCurl:
 
         # Timer management
         self._timer_handle: asyncio.TimerHandle | None = None
+
+    def setopt(self, *args):
+        """
+        Forward options to our CurlMulti() instance.
+        """
+        return self._multi.setopt(*args)
 
     async def perform(self, curl: pycurl.Curl) -> pycurl.Curl:
         """Execute a curl handle to completion.
