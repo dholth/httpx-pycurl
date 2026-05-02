@@ -23,16 +23,6 @@ _END_OF_STREAM = object()
 
 
 @dataclass
-class _CurlResponse:
-    status_code: int
-    reason_phrase: str
-    headers: list[tuple[bytes, bytes]]
-    http_version: bytes
-    body_file: BinaryIO | None = None
-    body_stream: _AsyncQueueStream | None = None
-
-
-@dataclass
 class _TransferContext:
     response_body: BinaryIO
     status_line: bytes | None = None
@@ -40,6 +30,10 @@ class _TransferContext:
     async_stream: _AsyncQueueStream | None = None
     headers_ready: asyncio.Event | None = None
     headers_complete: bool = False
+    # Populated after the transfer completes (or headers arrive)
+    status_code: int = 0
+    reason_phrase: str = ""
+    http_version: bytes = b""
 
 
 @dataclass
@@ -359,22 +353,12 @@ def _configure_curl(
             curl.setopt(pycurl.INFILESIZE_LARGE, size)
 
 
-def _finalize_curl_response(
-    curl: pycurl.Curl, context: _TransferContext
-) -> _CurlResponse:
-    status_code = int(curl.getinfo(pycurl.RESPONSE_CODE))
-    reason_phrase, http_version = _parse_status_line(context.status_line)
-    body_stream = context.async_stream
-    if body_stream is None:
+def _finalize_transfer(curl: pycurl.Curl, context: _TransferContext) -> None:
+    """Populate response fields on context from the completed curl handle."""
+    context.status_code = int(curl.getinfo(pycurl.RESPONSE_CODE))
+    context.reason_phrase, context.http_version = _parse_status_line(context.status_line)
+    if context.async_stream is None:
         context.response_body.seek(0)
-    return _CurlResponse(
-        status_code=status_code,
-        reason_phrase=reason_phrase,
-        headers=context.response_headers,
-        body_file=context.response_body if body_stream is None else None,
-        body_stream=body_stream,
-        http_version=http_version,
-    )
 
 
 class PyCurlTransport(httpx.BaseTransport):
@@ -399,24 +383,19 @@ class PyCurlTransport(httpx.BaseTransport):
         self._cainfo = cainfo or certifi.where()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        curl_response = self._perform_request(request)
-        stream = (
-            _SpooledFileStream(curl_response.body_file)
-            if curl_response.body_file
-            else curl_response.body_stream
-        )
+        context = self._perform_request(request)
         return httpx.Response(
-            status_code=curl_response.status_code,
-            headers=curl_response.headers,
-            stream=stream,
+            status_code=context.status_code,
+            headers=context.response_headers,
+            stream=_SpooledFileStream(context.response_body),
             request=request,
-            extensions={"http_version": curl_response.http_version},
+            extensions={"http_version": context.http_version},
         )
 
     def close(self):
         return
 
-    def _perform_request(self, request: httpx.Request) -> _CurlResponse:
+    def _perform_request(self, request: httpx.Request) -> _TransferContext:
         context = _TransferContext(
             response_body=SpooledTemporaryFile(max_size=1024 * 1024)
         )
@@ -442,7 +421,8 @@ class PyCurlTransport(httpx.BaseTransport):
             )
 
             curl.perform()
-            return _finalize_curl_response(curl, context)
+            _finalize_transfer(curl, context)
+            return context
         except pycurl.error as error:
             context.response_body.close()
             code, message = error.args
@@ -574,23 +554,23 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                         async_stream._queue.put_nowait(perform_error)
                     await async_stream.aclose()
 
-                    curl_response = _finalize_curl_response(curl, context)
-                    if perform_error is not None and curl_response.status_code == 0:
+                    _finalize_transfer(curl, context)
+                    if perform_error is not None and context.status_code == 0:
                         raise perform_error
                 else:
                     # Headers ready; transfer still running.
                     # _finish_streaming takes ownership of the handle.
-                    curl_response = _finalize_curl_response(curl, context)
+                    _finalize_transfer(curl, context)
                     asyncio.ensure_future(
                         self._finish_streaming(handle, context, async_stream, curl)
                     )
 
                 return httpx.Response(
-                    status_code=curl_response.status_code,
-                    headers=curl_response.headers,
-                    stream=curl_response.body_stream or _SpooledFileStream(curl_response.body_file),
+                    status_code=context.status_code,
+                    headers=context.response_headers,
+                    stream=context.async_stream or _SpooledFileStream(context.response_body),
                     request=request,
-                    extensions={"http_version": curl_response.http_version},
+                    extensions={"http_version": context.http_version},
                 )
 
             # --- Non-streaming path: buffer everything, then return ---
@@ -603,16 +583,16 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             finally:
                 self._transfers.pop(curl, None)
 
-            curl_response = _finalize_curl_response(curl, context)
-            if perform_error is not None and curl_response.status_code == 0:
+            _finalize_transfer(curl, context)
+            if perform_error is not None and context.status_code == 0:
                 raise perform_error
 
             return httpx.Response(
-                status_code=curl_response.status_code,
-                headers=curl_response.headers,
-                stream=_SpooledFileStream(curl_response.body_file),
+                status_code=context.status_code,
+                headers=context.response_headers,
+                stream=_SpooledFileStream(context.response_body),
                 request=request,
-                extensions={"http_version": curl_response.http_version},
+                extensions={"http_version": context.http_version},
             )
         except httpx.TransportError:
             raise
