@@ -162,9 +162,9 @@ class _AsyncQueueStream(httpx.AsyncByteStream):
     so we can put chunks directly into the queue without call_soon_threadsafe.
     """
 
-    def __init__(self, loop: asyncio.AbstractEventLoop):
+    def __init__(self, read_timeout: float | None = None):
         self._queue: asyncio.Queue[bytes | object] = asyncio.Queue()
-        self._loop = loop
+        self._read_timeout = read_timeout
 
     def write_callback(self, chunk: bytes) -> int:
         """Callback to be used by pycurl to add chunks to the queue.
@@ -182,7 +182,9 @@ class _AsyncQueueStream(httpx.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         while True:
             try:
-                chunk = await asyncio.wait_for(self._queue.get(), timeout=30.0)
+                chunk = await asyncio.wait_for(
+                    self._queue.get(), timeout=self._read_timeout
+                )
                 if chunk is _END_OF_STREAM:
                     break
                 if isinstance(chunk, Exception):
@@ -200,7 +202,6 @@ class _AsyncQueueStream(httpx.AsyncByteStream):
             self._queue.put_nowait(_END_OF_STREAM)
         except (RuntimeError, asyncio.QueueFull):
             pass
-
 
 
 def _parse_status_line(status_line: bytes | None) -> tuple[str, bytes]:
@@ -536,7 +537,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         curl = pycurl.Curl()
 
         # Create async queue stream for streaming response bodies if enabled
-        async_stream = _AsyncQueueStream(loop) if self._stream_response else None
+        async_stream = _AsyncQueueStream(self._timeout) if self._stream_response else None
         context.async_stream = async_stream
 
         # Create event for signaling when headers are ready
