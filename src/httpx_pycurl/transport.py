@@ -127,7 +127,7 @@ class _RequestBodyReader:
     # in memory first, while maintaining pycurl's synchronous callback interface.
 
 
-class _FileStream(httpx.SyncByteStream, httpx.AsyncByteStream):
+class _SpooledFileStream(httpx.SyncByteStream, httpx.AsyncByteStream):
     """Unified file-based stream supporting both sync and async iteration."""
 
     def __init__(self, body_file: BinaryIO, chunk_size: int = 65536):
@@ -429,7 +429,7 @@ class PyCurlTransport(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         curl_response = self._perform_request(request)
         stream = (
-            _FileStream(curl_response.body_file)
+            _SpooledFileStream(curl_response.body_file)
             if curl_response.body_file
             else curl_response.body_stream
         )
@@ -619,7 +619,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                 return httpx.Response(
                     status_code=curl_response.status_code,
                     headers=curl_response.headers,
-                    stream=curl_response.body_stream or _FileStream(curl_response.body_file),
+                    stream=curl_response.body_stream or _SpooledFileStream(curl_response.body_file),
                     request=request,
                     extensions={"http_version": curl_response.http_version},
                 )
@@ -641,7 +641,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             return httpx.Response(
                 status_code=curl_response.status_code,
                 headers=curl_response.headers,
-                stream=_FileStream(curl_response.body_file),
+                stream=_SpooledFileStream(curl_response.body_file),
                 request=request,
                 extensions={"http_version": curl_response.http_version},
             )
