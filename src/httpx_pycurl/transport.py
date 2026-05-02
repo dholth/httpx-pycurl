@@ -393,11 +393,11 @@ def _configure_curl(
 def _finalize_transfer(curl: pycurl.Curl, context: _TransferContext) -> None:
     """Populate response fields on context from the completed curl handle."""
     context.status_code = int(curl.getinfo(pycurl.RESPONSE_CODE))
-    context.reason_phrase, context.http_version = _parse_status_line(context.status_line)
+    context.reason_phrase, context.http_version = _parse_status_line(
+        context.status_line
+    )
     if context.async_stream is None:
         context.response_body.seek(0)
-
-
 
 
 class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
@@ -463,7 +463,9 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         curl = pycurl.Curl()
 
         # Create async queue stream for streaming response bodies if enabled
-        async_stream = _AsyncQueueStream(self._timeout) if self._stream_response else None
+        async_stream = (
+            _AsyncQueueStream(self._timeout) if self._stream_response else None
+        )
         context.async_stream = async_stream
 
         # Create event for signaling when headers are ready
@@ -492,7 +494,9 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
 
             # Start transfer (non-blocking, returns immediately)
             handle = self._curl.perform(curl)
-            self._transfers[curl] = _Transfer(request, context, handle.completion_future)
+            self._transfers[curl] = _Transfer(
+                request, context, handle.completion_future
+            )
 
             # --- Streaming path: return as soon as headers arrive ---
             if async_stream is not None:
@@ -537,7 +541,8 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                 return httpx.Response(
                     status_code=context.status_code,
                     headers=context.response_headers,
-                    stream=context.async_stream or _SpooledFileStream(context.response_body),
+                    stream=context.async_stream
+                    or _SpooledFileStream(context.response_body),
                     request=request,
                     extensions={"http_version": context.http_version},
                 )

@@ -9,12 +9,12 @@ import httpx
 import pycurl
 
 from .transport import (
-    _RequestBodyReader,
-    _SpooledFileStream,
-    _TransferContext,
     _configure_curl,
     _finalize_transfer,
     _map_pycurl_error,
+    _RequestBodyReader,
+    _SpooledFileStream,
+    _TransferContext,
 )
 
 if TYPE_CHECKING:
