@@ -201,12 +201,6 @@ class _AsyncQueueStream(httpx.AsyncByteStream):
         except (RuntimeError, asyncio.QueueFull):
             pass
 
-    def signal_end_of_stream(self):
-        """Signal end of stream - called from event loop context."""
-        try:
-            self._queue.put_nowait(_END_OF_STREAM)
-        except asyncio.QueueFull:
-            pass
 
 
 def _parse_status_line(status_line: bytes | None) -> tuple[str, bytes]:
@@ -603,7 +597,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                         code, message = error.args
                         perform_error = _map_pycurl_error(code, str(message), curl)
                         async_stream._queue.put_nowait(perform_error)
-                    async_stream.signal_end_of_stream()
+                    await async_stream.aclose()
 
                     curl_response = _finalize_curl_response(curl, context)
                     if perform_error is not None and curl_response.status_code == 0:
@@ -684,7 +678,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             perform_error = _map_pycurl_error(code, str(message), curl)
             async_stream._queue.put_nowait(perform_error)
         finally:
-            async_stream.signal_end_of_stream()
+            await async_stream.aclose()
             self._transfers.pop(curl, None)
             context.response_body.close()
             try:
