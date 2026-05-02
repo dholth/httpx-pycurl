@@ -52,48 +52,40 @@ class _Transfer:
 
 
 class _RequestBodyReader:
-    def __init__(self, stream: Iterable[bytes] | AsyncIterator[bytes]):
-        # Check if stream is async - prefer __iter__ for sync streams
-        # httpx.ByteStream has both __iter__ and __aiter__, so we need to check
-        # for __iter__ first to handle sync streams properly
-        if hasattr(stream, "__iter__"):
-            # Sync stream
-            self._iterator = iter(stream)
-            self._is_async = False
-            self._async_stream = None
-            self._chunks = []
-        elif hasattr(stream, "__aiter__"):
-            # Async stream (only if not also iterable)
-            self._iterator = None
-            self._is_async = True
-            self._async_stream = stream
-            self._chunks = []
-            self._chunks_consumed = False
-        else:
-            # Unknown stream type, treat as empty
-            self._iterator = iter([])
-            self._is_async = False
-            self._async_stream = None
-            self._chunks = []
+    """Adapts a sync or async request body stream to pycurl's synchronous READFUNCTION.
+
+    Use the async classmethod `from_stream` to construct an instance — it pre-consumes
+    any async stream so that `read()` can be called synchronously by pycurl.
+
+    TODO: Implement CURL_READFUNC_PAUSE strategy to avoid buffering large async bodies.
+    """
+
+    def __init__(self, iterator: Iterator[bytes]):
+        self._iterator = iterator
         self._buffer = b""
 
-    async def _consume_async_chunks(self):
-        """Consume all chunks from async stream into memory."""
-        if self._chunks_consumed:
-            return
-        self._chunks_consumed = True
-        async for chunk in self._async_stream:
-            if chunk:
-                self._chunks.append(chunk)
-        # Create iterator from collected chunks
-        self._iterator = iter(self._chunks)
+    @classmethod
+    async def from_stream(
+        cls, stream: Iterable[bytes] | AsyncIterator[bytes]
+    ) -> "_RequestBodyReader":
+        """Build a reader from a sync or async stream.
+
+        Async streams are fully consumed into memory before returning so that
+        pycurl's synchronous read callback can iterate them without blocking.
+        """
+        # httpx.ByteStream has both __iter__ and __aiter__; prefer sync path.
+        if hasattr(stream, "__iter__"):
+            return cls(iter(stream))  # type: ignore[arg-type]
+        if hasattr(stream, "__aiter__"):
+            chunks: list[bytes] = []
+            async for chunk in stream:  # type: ignore[union-attr]
+                if chunk:
+                    chunks.append(chunk)
+            return cls(iter(chunks))
+        # Unknown stream type — treat as empty.
+        return cls(iter([]))
 
     def read(self, size: int) -> bytes:
-        if self._iterator is None:
-            # This shouldn't happen in normal flow for async streams
-            # as _consume_async_chunks should be called first
-            return b""
-
         while len(self._buffer) < size:
             try:
                 chunk = next(self._iterator)
@@ -110,21 +102,6 @@ class _RequestBodyReader:
         data = self._buffer[:size]
         self._buffer = self._buffer[size:]
         return data
-
-    # TODO: Implement CURL_READFUNC_PAUSE strategy for streaming async request bodies
-    # Currently, async streams are pre-consumed into memory before being passed to curl's
-    # synchronous READFUNCTION callback. This works but has memory implications for large
-    # request bodies. A better approach would be to:
-    #
-    # 1. Return CURL_READFUNC_PAUSE from read() when the buffer is empty and more data
-    #    needs to be fetched from the async stream
-    # 2. Store reference to event loop and curl handle in _RequestBodyReader
-    # 3. Register async task to fetch next chunk from stream when PAUSE is returned
-    # 4. Call curl.pause(pycurl.PAUSE_RECV | pycurl.PAUSE_SEND) to pause transfer
-    # 5. Resume transfer with curl.pause(0) once next chunk is available
-    #
-    # This would allow truly streaming async request bodies without buffering everything
-    # in memory first, while maintaining pycurl's synchronous callback interface.
 
 
 class _SpooledFileStream(httpx.SyncByteStream, httpx.AsyncByteStream):
@@ -368,7 +345,7 @@ def _configure_curl(
         return
 
     if body_reader is None:
-        body_reader = _RequestBodyReader(request.stream)
+        body_reader = _RequestBodyReader(iter(request.stream))  # type: ignore[arg-type]
     curl.setopt(pycurl.READFUNCTION, body_reader.read)
     size = int(content_length) if content_length is not None else -1
 
@@ -447,7 +424,7 @@ class PyCurlTransport(httpx.BaseTransport):
         curl = pycurl.Curl()
         try:
             # Create a body reader for the request
-            body_reader = _RequestBodyReader(request.stream)
+            body_reader = _RequestBodyReader(iter(request.stream))  # type: ignore[arg-type]
 
             _configure_curl(
                 curl,
@@ -546,10 +523,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             context.headers_ready = asyncio.Event()
 
         try:
-            # Pre-consume async request streams
-            body_reader = _RequestBodyReader(request.stream)
-            if body_reader._is_async:
-                await body_reader._consume_async_chunks()
+            body_reader = await _RequestBodyReader.from_stream(request.stream)
 
             _configure_curl(
                 curl,
