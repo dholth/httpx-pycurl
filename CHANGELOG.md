@@ -1,3 +1,10 @@
+# 0.0.5
+
+- Implement true streaming responses
+- Simple benchmark script
+- Add own benchmark script results to README
+- Refactor, move sync transport into own module
+
 # 0.0.4
 
 - Refactor into curl-only `AsyncCurl()` to manage transfers, independent
