@@ -116,7 +116,9 @@ async def test_asynccurl_perform_with_simple_handle():
         perform_handle = curl_obj.perform(handle)
         assert perform_handle.curl is handle
         # Wait for the transfer to complete
-        result = await asyncio.wait_for(curl_obj.wait_for_completion(perform_handle), timeout=10)
+        result = await asyncio.wait_for(
+            curl_obj.wait_for_completion(perform_handle), timeout=10
+        )
         assert result is handle
     finally:
         await curl_obj.aclose()

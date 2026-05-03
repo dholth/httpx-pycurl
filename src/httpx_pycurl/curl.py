@@ -155,7 +155,7 @@ class AsyncCurl:
             except Exception as e:
                 logger.exception("Error closing CurlMulti: %s", e)
             self._multi = None
-        
+
         self._transfers.clear()
 
     async def __aenter__(self) -> AsyncCurl:

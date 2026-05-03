@@ -23,16 +23,6 @@ _END_OF_STREAM = object()
 
 
 @dataclass
-class _CurlResponse:
-    status_code: int
-    reason_phrase: str
-    headers: list[tuple[bytes, bytes]]
-    http_version: bytes
-    body_file: BinaryIO | None = None
-    body_stream: _AsyncQueueStream | None = None
-
-
-@dataclass
 class _TransferContext:
     response_body: BinaryIO
     status_line: bytes | None = None
@@ -40,6 +30,10 @@ class _TransferContext:
     async_stream: _AsyncQueueStream | None = None
     headers_ready: asyncio.Event | None = None
     headers_complete: bool = False
+    # Populated after the transfer completes (or headers arrive)
+    status_code: int = 0
+    reason_phrase: str = ""
+    http_version: bytes = b""
 
 
 @dataclass
@@ -52,48 +46,40 @@ class _Transfer:
 
 
 class _RequestBodyReader:
-    def __init__(self, stream: Iterable[bytes] | AsyncIterator[bytes]):
-        # Check if stream is async - prefer __iter__ for sync streams
-        # httpx.ByteStream has both __iter__ and __aiter__, so we need to check
-        # for __iter__ first to handle sync streams properly
-        if hasattr(stream, "__iter__"):
-            # Sync stream
-            self._iterator = iter(stream)
-            self._is_async = False
-            self._async_stream = None
-            self._chunks = []
-        elif hasattr(stream, "__aiter__"):
-            # Async stream (only if not also iterable)
-            self._iterator = None
-            self._is_async = True
-            self._async_stream = stream
-            self._chunks = []
-            self._chunks_consumed = False
-        else:
-            # Unknown stream type, treat as empty
-            self._iterator = iter([])
-            self._is_async = False
-            self._async_stream = None
-            self._chunks = []
+    """Adapts a sync or async request body stream to pycurl's synchronous READFUNCTION.
+
+    Use the async classmethod `from_stream` to construct an instance — it pre-consumes
+    any async stream so that `read()` can be called synchronously by pycurl.
+
+    TODO: Implement CURL_READFUNC_PAUSE strategy to avoid buffering large async bodies.
+    """
+
+    def __init__(self, iterator: Iterator[bytes]):
+        self._iterator = iterator
         self._buffer = b""
 
-    async def _consume_async_chunks(self):
-        """Consume all chunks from async stream into memory."""
-        if self._chunks_consumed:
-            return
-        self._chunks_consumed = True
-        async for chunk in self._async_stream:
-            if chunk:
-                self._chunks.append(chunk)
-        # Create iterator from collected chunks
-        self._iterator = iter(self._chunks)
+    @classmethod
+    async def from_stream(
+        cls, stream: Iterable[bytes] | AsyncIterator[bytes]
+    ) -> "_RequestBodyReader":
+        """Build a reader from a sync or async stream.
+
+        Async streams are fully consumed into memory before returning so that
+        pycurl's synchronous read callback can iterate them without blocking.
+        """
+        # httpx.ByteStream has both __iter__ and __aiter__; prefer sync path.
+        if hasattr(stream, "__iter__"):
+            return cls(iter(stream))  # type: ignore[arg-type]
+        if hasattr(stream, "__aiter__"):
+            chunks: list[bytes] = []
+            async for chunk in stream:  # type: ignore[union-attr]
+                if chunk:
+                    chunks.append(chunk)
+            return cls(iter(chunks))
+        # Unknown stream type — treat as empty.
+        return cls(iter([]))
 
     def read(self, size: int) -> bytes:
-        if self._iterator is None:
-            # This shouldn't happen in normal flow for async streams
-            # as _consume_async_chunks should be called first
-            return b""
-
         while len(self._buffer) < size:
             try:
                 chunk = next(self._iterator)
@@ -111,23 +97,8 @@ class _RequestBodyReader:
         self._buffer = self._buffer[size:]
         return data
 
-    # TODO: Implement CURL_READFUNC_PAUSE strategy for streaming async request bodies
-    # Currently, async streams are pre-consumed into memory before being passed to curl's
-    # synchronous READFUNCTION callback. This works but has memory implications for large
-    # request bodies. A better approach would be to:
-    #
-    # 1. Return CURL_READFUNC_PAUSE from read() when the buffer is empty and more data
-    #    needs to be fetched from the async stream
-    # 2. Store reference to event loop and curl handle in _RequestBodyReader
-    # 3. Register async task to fetch next chunk from stream when PAUSE is returned
-    # 4. Call curl.pause(pycurl.PAUSE_RECV | pycurl.PAUSE_SEND) to pause transfer
-    # 5. Resume transfer with curl.pause(0) once next chunk is available
-    #
-    # This would allow truly streaming async request bodies without buffering everything
-    # in memory first, while maintaining pycurl's synchronous callback interface.
 
-
-class _FileStream(httpx.SyncByteStream, httpx.AsyncByteStream):
+class _SpooledFileStream(httpx.SyncByteStream, httpx.AsyncByteStream):
     """Unified file-based stream supporting both sync and async iteration."""
 
     def __init__(self, body_file: BinaryIO, chunk_size: int = 65536):
@@ -162,9 +133,9 @@ class _AsyncQueueStream(httpx.AsyncByteStream):
     so we can put chunks directly into the queue without call_soon_threadsafe.
     """
 
-    def __init__(self, loop: asyncio.AbstractEventLoop):
+    def __init__(self, read_timeout: float | None = None):
         self._queue: asyncio.Queue[bytes | object] = asyncio.Queue()
-        self._loop = loop
+        self._read_timeout = read_timeout
 
     def write_callback(self, chunk: bytes) -> int:
         """Callback to be used by pycurl to add chunks to the queue.
@@ -182,7 +153,9 @@ class _AsyncQueueStream(httpx.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         while True:
             try:
-                chunk = await asyncio.wait_for(self._queue.get(), timeout=30.0)
+                chunk = await asyncio.wait_for(
+                    self._queue.get(), timeout=self._read_timeout
+                )
                 if chunk is _END_OF_STREAM:
                     break
                 if isinstance(chunk, Exception):
@@ -199,13 +172,6 @@ class _AsyncQueueStream(httpx.AsyncByteStream):
         try:
             self._queue.put_nowait(_END_OF_STREAM)
         except (RuntimeError, asyncio.QueueFull):
-            pass
-
-    def signal_end_of_stream(self):
-        """Signal end of stream - called from event loop context."""
-        try:
-            self._queue.put_nowait(_END_OF_STREAM)
-        except asyncio.QueueFull:
             pass
 
 
@@ -261,12 +227,32 @@ def _map_pycurl_error(
     return httpx.TransportError(f"pycurl error {code}: {message}")
 
 
-def _configure_curl(
+def _set_curl_timeouts(
+    curl: pycurl.Curl,
+    request: httpx.Request,
+    timeout: float | None,
+) -> None:
+    """Apply connect and operation timeouts to a curl handle."""
+    ext_timeout = request.extensions.get("timeout", {})
+    connect_timeout = ext_timeout.get("connect")
+    read_timeout = ext_timeout.get("read")
+
+    if connect_timeout is not None:
+        curl.setopt(pycurl.CONNECTTIMEOUT_MS, int(connect_timeout * 1000))
+    elif timeout is not None:
+        curl.setopt(pycurl.CONNECTTIMEOUT_MS, int(timeout * 1000))
+
+    # pycurl's TIMEOUT_MS covers the entire operation; prefer transport-level value.
+    effective_timeout = timeout if timeout is not None else read_timeout
+    if effective_timeout is not None:
+        curl.setopt(pycurl.TIMEOUT_MS, int(effective_timeout * 1000))
+
+
+def _set_curl_options(
     curl: pycurl.Curl,
     request: httpx.Request,
     context: _TransferContext,
     *,
-    timeout: float | None,
     verify: bool,
     follow_redirects: bool,
     user_agent: str | None,
@@ -274,30 +260,13 @@ def _configure_curl(
     debug_callback: Callable[[int, bytes], None] | None,
     debug_logger: logging.Logger | None,
     cainfo: str | None,
-    async_stream: _AsyncQueueStream | None = None,
-    body_reader: _RequestBodyReader | None = None,
-):
-    # Apply per-request connect timeout from httpx extensions
-    ext_timeout = request.extensions.get("timeout", {})
-    connect_timeout = ext_timeout.get("connect")
-    read_timeout = ext_timeout.get("read")
-    _pool_timeout = ext_timeout.get("pool")  # Not available in curl
-
-    if connect_timeout is not None:
-        curl.setopt(pycurl.CONNECTTIMEOUT_MS, int(connect_timeout * 1000))
-    elif timeout is not None:
-        curl.setopt(pycurl.CONNECTTIMEOUT_MS, int(timeout * 1000))
-
-    # Use transport-level timeout if specified, otherwise use read timeout from request
-    # pycurl's TIMEOUT_MS sets the maximum time for the entire operation
-    effective_timeout = timeout if timeout is not None else read_timeout
-    if effective_timeout is not None:
-        curl.setopt(pycurl.TIMEOUT_MS, int(effective_timeout * 1000))
+    async_stream: _AsyncQueueStream | None,
+) -> None:
+    """Set URL, SSL, headers, debug, and I/O callbacks on a curl handle."""
 
     def header_callback(chunk: bytes) -> int:
         line = chunk.rstrip(b"\r\n")
         if not line:
-            # Blank line indicates end of headers
             if context.status_line is not None and not context.headers_complete:
                 context.headers_complete = True
                 if context.headers_ready is not None:
@@ -315,12 +284,9 @@ def _configure_curl(
 
     def write_callback(chunk: bytes) -> int:
         if async_stream is not None:
-            # Use async stream for streaming response bodies
             return async_stream.write_callback(chunk)
-        else:
-            # Fall back to file-based buffering
-            context.response_body.write(chunk)
-            return len(chunk)
+        context.response_body.write(chunk)
+        return len(chunk)
 
     curl.setopt(pycurl.URL, str(request.url))
     curl.setopt(pycurl.WRITEFUNCTION, write_callback)
@@ -329,31 +295,34 @@ def _configure_curl(
     curl.setopt(pycurl.FOLLOWLOCATION, 1 if follow_redirects else 0)
     curl.setopt(pycurl.SSL_VERIFYPEER, 1 if verify else 0)
     curl.setopt(pycurl.SSL_VERIFYHOST, 2 if verify else 0)
-    # cost incurred when TLS connection is made
     curl.setopt(pycurl.CAINFO, cainfo)
     if user_agent:
         curl.setopt(pycurl.USERAGENT, user_agent)
 
-    debug_enabled = verbose or debug_callback is not None or debug_logger is not None
-    if debug_enabled:
+    if verbose or debug_callback is not None or debug_logger is not None:
         curl.setopt(pycurl.VERBOSE, 1)
         if debug_callback is not None:
             context.debug_callback = debug_callback
             curl.setopt(pycurl.DEBUGFUNCTION, context.debug_callback)
         elif debug_logger is not None:
 
-            def _log_debug(info_type: int, data: bytes):
+            def _log_debug(info_type: int, data: bytes) -> None:
                 debug_logger.debug("curl[%s] %r", info_type, data)
 
             context.debug_callback = _log_debug
             curl.setopt(pycurl.DEBUGFUNCTION, context.debug_callback)
 
-    headers: list[str] = []
-    for key, value in request.headers.multi_items():
-        headers.append(f"{key}: {value}")
+    headers: list[str] = [f"{k}: {v}" for k, v in request.headers.multi_items()]
     if headers:
         curl.setopt(pycurl.HTTPHEADER, headers)
 
+
+def _set_curl_method(
+    curl: pycurl.Curl,
+    request: httpx.Request,
+    body_reader: _RequestBodyReader | None,
+) -> None:
+    """Configure the HTTP method and request body on a curl handle."""
     method = request.method.upper()
     if method == "GET":
         curl.setopt(pycurl.HTTPGET, 1)
@@ -373,7 +342,7 @@ def _configure_curl(
         return
 
     if body_reader is None:
-        body_reader = _RequestBodyReader(request.stream)
+        body_reader = _RequestBodyReader(iter(request.stream))  # type: ignore[arg-type]
     curl.setopt(pycurl.READFUNCTION, body_reader.read)
     size = int(content_length) if content_length is not None else -1
 
@@ -387,96 +356,48 @@ def _configure_curl(
             curl.setopt(pycurl.INFILESIZE_LARGE, size)
 
 
-def _finalize_curl_response(
-    curl: pycurl.Curl, context: _TransferContext
-) -> _CurlResponse:
-    status_code = int(curl.getinfo(pycurl.RESPONSE_CODE))
-    reason_phrase, http_version = _parse_status_line(context.status_line)
-    body_stream = context.async_stream
-    if body_stream is None:
-        context.response_body.seek(0)
-    return _CurlResponse(
-        status_code=status_code,
-        reason_phrase=reason_phrase,
-        headers=context.response_headers,
-        body_file=context.response_body if body_stream is None else None,
-        body_stream=body_stream,
-        http_version=http_version,
+def _configure_curl(
+    curl: pycurl.Curl,
+    request: httpx.Request,
+    context: _TransferContext,
+    *,
+    timeout: float | None,
+    verify: bool,
+    follow_redirects: bool,
+    user_agent: str | None,
+    verbose: bool,
+    debug_callback: Callable[[int, bytes], None] | None,
+    debug_logger: logging.Logger | None,
+    cainfo: str | None,
+    async_stream: _AsyncQueueStream | None = None,
+    body_reader: _RequestBodyReader | None = None,
+) -> None:
+    """Configure a curl handle for the given request and transfer context."""
+    _set_curl_timeouts(curl, request, timeout)
+    _set_curl_options(
+        curl,
+        request,
+        context,
+        verify=verify,
+        follow_redirects=follow_redirects,
+        user_agent=user_agent,
+        verbose=verbose,
+        debug_callback=debug_callback,
+        debug_logger=debug_logger,
+        cainfo=cainfo,
+        async_stream=async_stream,
     )
+    _set_curl_method(curl, request, body_reader)
 
 
-class PyCurlTransport(httpx.BaseTransport):
-    def __init__(
-        self,
-        timeout: float | None = None,
-        verify: bool = True,
-        follow_redirects: bool = False,
-        user_agent: str | None = None,
-        verbose: bool = False,
-        debug_callback: Callable[[int, bytes], None] | None = None,
-        debug_logger: logging.Logger | None = None,
-        cainfo: str | None = None,
-    ):
-        self._timeout = timeout
-        self._verify = verify
-        self._follow_redirects = follow_redirects
-        self._user_agent = user_agent
-        self._verbose = verbose
-        self._debug_callback = debug_callback
-        self._debug_logger = debug_logger
-        self._cainfo = cainfo or certifi.where()
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        curl_response = self._perform_request(request)
-        stream = (
-            _FileStream(curl_response.body_file)
-            if curl_response.body_file
-            else curl_response.body_stream
-        )
-        return httpx.Response(
-            status_code=curl_response.status_code,
-            headers=curl_response.headers,
-            stream=stream,
-            request=request,
-            extensions={"http_version": curl_response.http_version},
-        )
-
-    def close(self):
-        return
-
-    def _perform_request(self, request: httpx.Request) -> _CurlResponse:
-        context = _TransferContext(
-            response_body=SpooledTemporaryFile(max_size=1024 * 1024)
-        )
-
-        curl = pycurl.Curl()
-        try:
-            # Create a body reader for the request
-            body_reader = _RequestBodyReader(request.stream)
-
-            _configure_curl(
-                curl,
-                request,
-                context,
-                timeout=self._timeout,
-                verify=self._verify,
-                follow_redirects=self._follow_redirects,
-                user_agent=self._user_agent,
-                verbose=self._verbose,
-                debug_callback=self._debug_callback,
-                debug_logger=self._debug_logger,
-                cainfo=self._cainfo,
-                body_reader=body_reader,
-            )
-
-            curl.perform()
-            return _finalize_curl_response(curl, context)
-        except pycurl.error as error:
-            context.response_body.close()
-            code, message = error.args
-            raise _map_pycurl_error(code, str(message), curl) from error
-        finally:
-            curl.close()
+def _finalize_transfer(curl: pycurl.Curl, context: _TransferContext) -> None:
+    """Populate response fields on context from the completed curl handle."""
+    context.status_code = int(curl.getinfo(pycurl.RESPONSE_CODE))
+    context.reason_phrase, context.http_version = _parse_status_line(
+        context.status_line
+    )
+    if context.async_stream is None:
+        context.response_body.seek(0)
 
 
 class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
@@ -542,7 +463,9 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         curl = pycurl.Curl()
 
         # Create async queue stream for streaming response bodies if enabled
-        async_stream = _AsyncQueueStream(loop) if self._stream_response else None
+        async_stream = (
+            _AsyncQueueStream(self._timeout) if self._stream_response else None
+        )
         context.async_stream = async_stream
 
         # Create event for signaling when headers are ready
@@ -551,10 +474,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             context.headers_ready = asyncio.Event()
 
         try:
-            # Pre-consume async request streams
-            body_reader = _RequestBodyReader(request.stream)
-            if body_reader._is_async:
-                await body_reader._consume_async_chunks()
+            body_reader = await _RequestBodyReader.from_stream(request.stream)
 
             _configure_curl(
                 curl,
@@ -574,7 +494,9 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
 
             # Start transfer (non-blocking, returns immediately)
             handle = self._curl.perform(curl)
-            self._transfers[curl] = _Transfer(request, context, handle.completion_future)
+            self._transfers[curl] = _Transfer(
+                request, context, handle.completion_future
+            )
 
             # --- Streaming path: return as soon as headers arrive ---
             if async_stream is not None:
@@ -603,25 +525,26 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                         code, message = error.args
                         perform_error = _map_pycurl_error(code, str(message), curl)
                         async_stream._queue.put_nowait(perform_error)
-                    async_stream.signal_end_of_stream()
+                    await async_stream.aclose()
 
-                    curl_response = _finalize_curl_response(curl, context)
-                    if perform_error is not None and curl_response.status_code == 0:
+                    _finalize_transfer(curl, context)
+                    if perform_error is not None and context.status_code == 0:
                         raise perform_error
                 else:
                     # Headers ready; transfer still running.
                     # _finish_streaming takes ownership of the handle.
-                    curl_response = _finalize_curl_response(curl, context)
+                    _finalize_transfer(curl, context)
                     asyncio.ensure_future(
                         self._finish_streaming(handle, context, async_stream, curl)
                     )
 
                 return httpx.Response(
-                    status_code=curl_response.status_code,
-                    headers=curl_response.headers,
-                    stream=curl_response.body_stream or _FileStream(curl_response.body_file),
+                    status_code=context.status_code,
+                    headers=context.response_headers,
+                    stream=context.async_stream
+                    or _SpooledFileStream(context.response_body),
                     request=request,
-                    extensions={"http_version": curl_response.http_version},
+                    extensions={"http_version": context.http_version},
                 )
 
             # --- Non-streaming path: buffer everything, then return ---
@@ -634,16 +557,16 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             finally:
                 self._transfers.pop(curl, None)
 
-            curl_response = _finalize_curl_response(curl, context)
-            if perform_error is not None and curl_response.status_code == 0:
+            _finalize_transfer(curl, context)
+            if perform_error is not None and context.status_code == 0:
                 raise perform_error
 
             return httpx.Response(
-                status_code=curl_response.status_code,
-                headers=curl_response.headers,
-                stream=_FileStream(curl_response.body_file),
+                status_code=context.status_code,
+                headers=context.response_headers,
+                stream=_SpooledFileStream(context.response_body),
                 request=request,
-                extensions={"http_version": curl_response.http_version},
+                extensions={"http_version": context.http_version},
             )
         except httpx.TransportError:
             raise
@@ -684,7 +607,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             perform_error = _map_pycurl_error(code, str(message), curl)
             async_stream._queue.put_nowait(perform_error)
         finally:
-            async_stream.signal_end_of_stream()
+            await async_stream.aclose()
             self._transfers.pop(curl, None)
             context.response_body.close()
             try:

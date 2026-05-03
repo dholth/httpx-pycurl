@@ -54,8 +54,11 @@ async def bench(PARTITIONS, COUNT):
     for runs in range(PARTITIONS):
         for client, name in clients:
             begin = time.perf_counter_ns()
-            # async with client as client:
-            await asyncio.gather(*(get_one(client, URL) for _ in range(COUNT)))
+            async with asyncio.TaskGroup():
+                # create_task() is same speed as gather()
+                # for _ in range(COUNT):
+                #     tg.create_task(get_one(client, URL))
+                await asyncio.gather(*(get_one(client, URL) for _ in range(COUNT)))
             end = time.perf_counter_ns()
             results_by_client[name].append((end - begin) / 1e9)
 
