@@ -1,3 +1,8 @@
+# 0.0.6
+
+- Improve cleanup on `CurlMulti.close()`; `AsyncCurl()` now avoids calling
+  `CurlMulti()` methods during or after its `.close()` call.
+
 # 0.0.5
 
 - Implement true streaming responses
