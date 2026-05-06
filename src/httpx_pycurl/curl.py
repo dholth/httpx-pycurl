@@ -263,14 +263,10 @@ class AsyncCurl:
 
     def _on_socket_readable(self, fd: int) -> None:
         """Called when socket is readable."""
-        if self._closed:
-            logger.debug("_on_socket_readable(%s) after close", fd)
-            return
         self._drive_socket(fd, pycurl.CSELECT_IN)
 
     def _on_socket_writable(self, fd: int) -> None:
         """Called when socket is writable."""
-
         self._drive_socket(fd, pycurl.CSELECT_OUT)
 
     def _on_timeout(self) -> None:
