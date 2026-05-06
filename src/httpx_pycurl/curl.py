@@ -225,6 +225,8 @@ class AsyncCurl:
 
     def _timer_callback(self, timeout_ms: int) -> int:
         """Called by libcurl to schedule next timeout."""
+        if self._closed:
+            logger.debug("_timer_callback(timeout_ms=%s) after close.", timeout_ms)
         self._schedule_timeout(timeout_ms)
         return 0
 
@@ -261,10 +263,14 @@ class AsyncCurl:
 
     def _on_socket_readable(self, fd: int) -> None:
         """Called when socket is readable."""
+        if self._closed:
+            logger.debug("_on_socket_readable(%s) after close", fd)
+            return
         self._drive_socket(fd, pycurl.CSELECT_IN)
 
     def _on_socket_writable(self, fd: int) -> None:
         """Called when socket is writable."""
+
         self._drive_socket(fd, pycurl.CSELECT_OUT)
 
     def _on_timeout(self) -> None:
@@ -275,6 +281,16 @@ class AsyncCurl:
     def _drive_socket(self, sock_fd: int, event_mask: int) -> None:
         """Process socket activity in the multi handle."""
         # Call socket_action until no more immediate work
+        if self._closed:
+            # normal on shutdown, ignore; curl cleans its own fd's.
+            # .socket_action() can no longer succeed.
+            logger.debug(
+                "_drive_socket(sock_fd=%s, event_mask=%s) after close",
+                sock_fd,
+                event_mask,
+            )
+            return
+
         while True:
             status, _running = self._multi.socket_action(sock_fd, event_mask)
             if status != pycurl.E_CALL_MULTI_PERFORM:
