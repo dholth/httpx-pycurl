@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import pycurl
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -153,7 +153,7 @@ class AsyncCurl:
             try:
                 self._multi.close()
             except Exception as e:
-                logger.exception("Error closing CurlMulti: %s", e)
+                log.exception("Error closing CurlMulti: %s", e)
             self._multi = None
 
         self._transfers.clear()
@@ -205,7 +205,7 @@ class AsyncCurl:
             if what in {pycurl.POLL_OUT, pycurl.POLL_INOUT}:
                 self._loop.add_writer(fd, self._on_socket_writable, fd)
         except (OSError, ValueError, RuntimeError) as e:
-            logger.warning("Failed to register socket %d: %s", fd, e)
+            log.warning("Failed to register socket %d: %s", fd, e)
             self._socket_watch.pop(fd, None)
             try:
                 self._loop.remove_reader(fd)
@@ -226,7 +226,7 @@ class AsyncCurl:
     def _timer_callback(self, timeout_ms: int) -> int:
         """Called by libcurl to schedule next timeout."""
         if self._closed:
-            logger.debug("_timer_callback(timeout_ms=%s) after close.", timeout_ms)
+            log.debug("_timer_callback(timeout_ms=%s) after close.", timeout_ms)
         self._schedule_timeout(timeout_ms)
         return 0
 
@@ -280,7 +280,7 @@ class AsyncCurl:
         if self._closed:
             # normal on shutdown, ignore; curl cleans its own fd's.
             # .socket_action() can no longer succeed.
-            logger.debug(
+            log.debug(
                 "_drive_socket(sock_fd=%s, event_mask=%s) after close",
                 sock_fd,
                 event_mask,
@@ -331,4 +331,4 @@ class AsyncCurl:
         try:
             self._multi.remove_handle(curl)
         except Exception as e:
-            logger.warning("Error removing handle from multi: %s", e)
+            log.warning("Error removing handle from multi: %s", e)
