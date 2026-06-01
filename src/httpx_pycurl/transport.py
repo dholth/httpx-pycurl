@@ -10,8 +10,7 @@ import anyio
 import certifi
 import httpx
 import pycurl
-
-from .curl import AsyncCurl, PerformHandle
+from pycurl import AsyncCurlMulti
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -425,12 +424,12 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         self._cainfo = cainfo or certifi.where()
         self._stream_response = stream_response
 
-        self._curl: AsyncCurl | None = None
+        self._multi: AsyncCurlMulti | None = None
         self._closed = False
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        # Track in-flight transfers
-        self._transfers: dict[pycurl.Curl, _Transfer] = {}
+        # Track in-flight transfers: curl handle -> (future, _Transfer)
+        self._transfers: dict[pycurl.Curl, tuple[asyncio.Future, _Transfer]] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if self._closed:
@@ -451,11 +450,11 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                 "AsyncPyCurlTransport must be used from one event loop"
             )
 
-        # Lazily initialize AsyncCurl on first request
-        if self._curl is None:
-            self._curl = AsyncCurl(loop)
+        # Lazily initialize AsyncCurlMulti on first request
+        if self._multi is None:
+            self._multi = AsyncCurlMulti()
             # since curl 7.30.0 (2013):
-            self._curl.setopt(pycurl.M_MAX_TOTAL_CONNECTIONS, self._max_connections)
+            self._multi.setopt(pycurl.M_MAX_TOTAL_CONNECTIONS, self._max_connections)
 
         context = _TransferContext(
             response_body=SpooledTemporaryFile(max_size=1024 * 1024)
@@ -493,19 +492,18 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             )
 
             # Start transfer (non-blocking, returns immediately)
-            handle = self._curl.perform(curl)
-            self._transfers[curl] = _Transfer(
-                request, context, handle.completion_future
-            )
+            future = self._multi.add_handle(curl)
+            self._transfers[curl] = (future, _Transfer(request, context, future))
 
             # --- Streaming path: return as soon as headers arrive ---
             if async_stream is not None:
                 # Race the headers-ready event against the raw completion future.
                 # We do NOT wrap the completion future in wait_for_completion here
                 # because cancelling that coroutine would discard the future's result.
+                future, _ = self._transfers[curl]
                 headers_task = asyncio.ensure_future(context.headers_ready.wait())
                 await asyncio.wait(
-                    [headers_task, handle.completion_future],
+                    [headers_task, future],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 # Always cancel / clean up the headers_task; it's ephemeral.
@@ -515,12 +513,12 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                 except (asyncio.CancelledError, Exception):
                     pass
 
-                if handle.completion_future.done():
+                if future.done():
                     # Transfer finished before (or at same time as) headers.
                     self._transfers.pop(curl, None)
                     perform_error: httpx.TransportError | None = None
                     try:
-                        handle.completion_future.result()
+                        future.result()
                     except pycurl.error as error:
                         code, message = error.args
                         perform_error = _map_pycurl_error(code, str(message), curl)
@@ -532,10 +530,10 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
                         raise perform_error
                 else:
                     # Headers ready; transfer still running.
-                    # _finish_streaming takes ownership of the handle.
+                    # _finish_streaming takes ownership of the future.
                     _finalize_transfer(curl, context)
                     asyncio.ensure_future(
-                        self._finish_streaming(handle, context, async_stream, curl)
+                        self._finish_streaming(future, context, async_stream, curl)
                     )
 
                 return httpx.Response(
@@ -550,7 +548,8 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             # --- Non-streaming path: buffer everything, then return ---
             perform_error = None
             try:
-                await self._curl.wait_for_completion(handle)
+                future, _ = self._transfers[curl]
+                await future
             except pycurl.error as error:
                 code, message = error.args
                 perform_error = _map_pycurl_error(code, str(message), curl)
@@ -590,7 +589,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
 
     async def _finish_streaming(
         self,
-        handle: PerformHandle,
+        future: asyncio.Future,
         context: _TransferContext,
         async_stream: _AsyncQueueStream,
         curl: pycurl.Curl,
@@ -601,7 +600,7 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
         consumer of async_stream unblocks. Handles errors by queuing them.
         """
         try:
-            await self._curl.wait_for_completion(handle)
+            await future
         except pycurl.error as error:
             code, message = error.args
             perform_error = _map_pycurl_error(code, str(message), curl)
@@ -620,12 +619,17 @@ class AsyncPyCurlTransport(httpx.AsyncBaseTransport):
             return
         self._closed = True
 
-        # Close AsyncCurl if it was initialized
-        if self._curl is not None:
-            await self._curl.aclose()
+        # Close AsyncCurlMulti if it was initialized
+        if self._multi is not None:
+            try:
+                await self._multi.aclose()
+            except Exception:
+                pass
+            self._multi = None
 
         # Clean up any remaining transfers
-        for curl, transfer in list(self._transfers.items()):
+        for curl, (future, transfer) in list(self._transfers.items()):
+            future.cancel()
             transfer.context.response_body.close()
             try:
                 curl.close()
